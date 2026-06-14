@@ -1,0 +1,39 @@
+# ── Secrets / Environment ──────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ─────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ── Database / Storage ─────────────────────────────
+*.sqlite3
+*.sqlite
+*.db
+dump.rdb
+chroma_data/
+
+# ── Uploads ────────────────────────────────────────
+uploads/
+!uploads/.gitkeep
+
+# ── Frontend ───────────────────────────────────────
+node_modules/
+dist/
+.next/
+
+# ── IDE ────────────────────────────────────────────
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db

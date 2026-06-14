@@ -1,0 +1,67 @@
+[
+  {
+    "title": "前端开发工程师",
+    "category": "frontend",
+    "level": "mid",
+    "description": "负责公司产品的前端开发，使用 Vue/React 构建用户界面，与后端协作完成产品迭代。",
+    "requirements": {
+      "skills": ["HTML", "CSS", "JavaScript", "Vue", "React", "TypeScript", "Webpack", "Git"],
+      "experience": "2-5年",
+      "education": "本科及以上"
+    },
+    "salary_range": "15K-25K",
+    "company_type": "互联网"
+  },
+  {
+    "title": "Python后端开发工程师",
+    "category": "backend",
+    "level": "mid",
+    "description": "负责后端服务开发与维护，设计 RESTful API，优化数据库性能，参与系统架构设计。",
+    "requirements": {
+      "skills": ["Python", "FastAPI", "Django", "MySQL", "Redis", "Docker", "Linux", "Git"],
+      "experience": "2-5年",
+      "education": "本科及以上"
+    },
+    "salary_range": "18K-30K",
+    "company_type": "互联网"
+  },
+  {
+    "title": "数据分析师",
+    "category": "data",
+    "level": "junior",
+    "description": "负责业务数据分析，制作数据报表，为产品和运营提供数据支持。",
+    "requirements": {
+      "skills": ["Python", "SQL", "Excel", "Tableau", "Pandas", "NumPy", "统计学"],
+      "experience": "0-2年",
+      "education": "本科及以上"
+    },
+    "salary_range": "10K-18K",
+    "company_type": "互联网"
+  },
+  {
+    "title": "全栈开发工程师",
+    "category": "fullstack",
+    "level": "senior",
+    "description": "负责全栈应用开发，从前端到后端完整交付，指导和培养初中级工程师。",
+    "requirements": {
+      "skills": ["JavaScript", "TypeScript", "Vue", "React", "Node.js", "Python", "MySQL", "MongoDB", "Docker", "AWS", "CI/CD"],
+      "experience": "5-10年",
+      "education": "本科及以上"
+    },
+    "salary_range": "30K-50K",
+    "company_type": "互联网"
+  },
+  {
+    "title": "DevOps工程师",
+    "category": "devops",
+    "level": "senior",
+    "description": "负责 CI/CD 流水线建设，容器化部署，监控告警系统搭建，保障线上服务稳定性。",
+    "requirements": {
+      "skills": ["Linux", "Docker", "Kubernetes", "Jenkins", "Ansible", "Terraform", "Prometheus", "Grafana", "AWS/Azure", "Python/Shell"],
+      "experience": "5-10年",
+      "education": "本科及以上"
+    },
+    "salary_range": "30K-45K",
+    "company_type": "互联网"
+  }
+]

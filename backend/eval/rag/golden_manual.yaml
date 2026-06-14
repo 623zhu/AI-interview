@@ -1,0 +1,64 @@
+# 手工黄金集模板 — RAG 评测
+#
+# 挑你最关心的面试场景，每条写 query + 期望命中的题目 id。
+# query 要用面试官的口语，不能照抄题面。
+# must_include_ids: 至少一个要进 top-5
+# any_of_ids: 进 top-5 算 soft hit（nDCG 加分）
+# forbidden_ids: 不该出现的（可选）
+#
+# 题目 id 从 MySQL questions 表查，或者跑 python manage.py seed-questions 后看日志。
+#
+# 用法:
+#   python -m eval.rag.run_eval run --label manual_base --no-rerank --golden eval/rag/golden_manual.yaml
+#   python -m eval.rag.run_eval run --label manual_rr   --rerank   --golden eval/rag/golden_manual.yaml
+#   python -m eval.rag.run_eval compare manual_base manual_rr
+
+- query: "讲讲项目里 RAG 检索的具体实现流程"
+  must_include_ids: []        # ← 填你题库里相关题目的 id
+  any_of_ids: []
+  skill_nodes: ["RAG", "向量检索"]
+
+- query: "Redis 缓存穿透怎么解决"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["Redis", "缓存"]
+
+- query: "说说你对微服务拆分的理解"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["微服务", "架构设计"]
+
+- query: "数据库慢查询怎么排查和优化"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["MySQL", "性能优化"]
+
+- query: "Python 的 GIL 对多线程有什么影响"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["Python", "并发"]
+
+- query: "消息队列在你项目里是怎么用的"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["消息队列", "Kafka", "RabbitMQ"]
+
+- query: "Docker 和 K8s 在你们项目里怎么部署的"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["Docker", "Kubernetes"]
+
+- query: "接口限流一般怎么做"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["限流", "高并发"]
+
+- query: "分布式锁你用过哪些方案"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["分布式锁", "Redis", "ZooKeeper"]
+
+- query: "前端状态管理你们用的什么方案"
+  must_include_ids: []
+  any_of_ids: []
+  skill_nodes: ["前端", "状态管理", "React"]
