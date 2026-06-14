@@ -275,7 +275,7 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
         ctx.is_ended = True
         ctx.profile.impression = summary
         try:
-            from app.agent.score_agent import generate_report as _gen
+            from app.agent.report import generate_report as _gen
             report = await _gen(ctx.db, ctx.session.id)
             await ctx.db.commit()
             ctx.report_id = report.id

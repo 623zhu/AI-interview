@@ -11,7 +11,7 @@ from app.models.interview_session import InterviewSession
 from app.models.score_report import ScoreReport
 from app.models.job_position import JobPosition
 from app.schemas.report import ReportOut, ReportListItem
-from app.agent.score_agent import generate_report
+from app.agent.report import generate_report
 
 router = APIRouter()
 
@@ -87,7 +87,7 @@ async def get_report_by_session(
             raise HTTPException(status_code=404, detail="面试会话不存在")
 
         # Generate report on-the-fly and complete the session
-        from app.agent.score_agent import generate_report as _gen
+        from app.agent.report import generate_report as _gen
         session.status = "completed"
         report = await _gen(db, session_id)
         await db.commit()

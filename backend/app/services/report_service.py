@@ -1,10 +1,10 @@
-"""Report generation service — delegates to Score Agent.
+"""Report generation service — delegates to report module.
 
 For actual report generation, see:
-- app.agent.score_agent.generate_report() — full report from interview messages
+- app.agent.report.generate_report() — full report from interview messages
 """
 from app.models.interview_session import InterviewSession
-from app.agent.score_agent import generate_report as _generate_report
+from app.agent.report import generate_report as _generate_report
 
 
 async def generate_report(session: InterviewSession) -> dict:

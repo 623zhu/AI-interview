@@ -22,7 +22,7 @@ from app.schemas.interview import (
     ChatRequest, StartInterviewResponse,
 )
 from app.agent.interview_agent import InterviewManager
-from app.agent.score_agent import generate_report as generate_score_report
+from app.agent.report import generate_report as generate_score_report
 from app.utils.resume_utils import build_resume_context
 
 router = APIRouter()
