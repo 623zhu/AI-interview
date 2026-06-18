@@ -10,6 +10,7 @@ Tools:
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 from sqlalchemy import select
@@ -20,6 +21,7 @@ from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage
 
 from app.core.llm import get_llm
+from app.core.interview_state import ACTION_END, assert_can_perform, next_status_for
 from app.agent.rag import search_questions
 from app.agent.prompts import REACT_SYSTEM_PROMPT
 from app.models.interview_session import InterviewMessage, InterviewSession
@@ -27,6 +29,116 @@ from app.models.question import Question
 from app.models.question_link import InterviewQuestionLink
 
 logger = logging.getLogger(__name__)
+
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+MAX_TOOL_TEXT_LENGTH = 1200
+MAX_RETRIEVAL_QUERY_LENGTH = 300
+MAX_SKILL_PATH_LENGTH = 200
+
+
+class ToolValidationError(ValueError):
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+    def to_tool_result(self) -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "code": self.code,
+                "message": self.message,
+                "details": self.details,
+            },
+            ensure_ascii=False,
+        )
+
+
+def _clean_text(value: Any, field: str, *, max_length: int, required: bool = False) -> str:
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ToolValidationError(
+            "tool_invalid_argument",
+            f"{field} must be a string.",
+            {"field": field},
+        )
+
+    cleaned = value.strip()
+    if required and not cleaned:
+        raise ToolValidationError(
+            "tool_missing_argument",
+            f"{field} is required.",
+            {"field": field},
+        )
+    return cleaned[:max_length]
+
+
+def validate_score(value: Any, field: str) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolValidationError(
+            "tool_invalid_score",
+            f"{field} must be a number between 0 and 1.",
+            {"field": field},
+        ) from exc
+
+    if score < 0 or score > 1:
+        raise ToolValidationError(
+            "tool_invalid_score",
+            f"{field} must be between 0 and 1.",
+            {"field": field, "value": score},
+        )
+    return score
+
+
+def validate_difficulty(value: Any) -> str:
+    difficulty = _clean_text(value or "medium", "difficulty", max_length=20).lower()
+    if difficulty not in VALID_DIFFICULTIES:
+        raise ToolValidationError(
+            "tool_invalid_difficulty",
+            "difficulty must be one of easy, medium, hard.",
+            {"field": "difficulty", "value": difficulty},
+        )
+    return difficulty
+
+
+def validate_retrieve_questions_args(query: Any, difficulty: Any) -> tuple[str, str]:
+    return (
+        _clean_text(
+            query,
+            "query",
+            max_length=MAX_RETRIEVAL_QUERY_LENGTH,
+            required=True,
+        ),
+        validate_difficulty(difficulty),
+    )
+
+
+def validate_skill_update_args(
+    *,
+    skill_path: Any,
+    confidence: Any,
+    depth: Any,
+    comment: Any = "",
+    gaps: Any = "",
+    impression: Any = "",
+) -> dict[str, Any]:
+    return {
+        "skill_path": _clean_text(
+            skill_path,
+            "skill_path",
+            max_length=MAX_SKILL_PATH_LENGTH,
+            required=True,
+        ),
+        "confidence": validate_score(confidence, "confidence"),
+        "depth": validate_score(depth, "depth"),
+        "comment": _clean_text(comment, "comment", max_length=MAX_TOOL_TEXT_LENGTH),
+        "gaps": _clean_text(gaps, "gaps", max_length=MAX_TOOL_TEXT_LENGTH),
+        "impression": _clean_text(impression, "impression", max_length=MAX_TOOL_TEXT_LENGTH),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -130,6 +242,22 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
             expected_points: 本题的核心考察点（来自检索结果）
             reference_answer: 本题的参考答案（来自检索结果）
         """
+        try:
+            args = validate_skill_update_args(
+                skill_path=skill_path,
+                confidence=confidence,
+                depth=depth,
+                comment=comment,
+                gaps=gaps,
+            )
+            skill_path = args["skill_path"]
+            confidence = args["confidence"]
+            depth = args["depth"]
+            comment = args["comment"]
+            gaps = args["gaps"]
+        except ToolValidationError as exc:
+            return exc.to_tool_result()
+
         ctx.evaluation = {
             "skill_path": skill_path, "comment": comment,
             "confidence": confidence, "depth": depth, "gaps": gaps,
@@ -162,12 +290,17 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
             query: 用自然语言描述你想问的方向（如"RAG检索的具体实现流程"），不要传技能路径
             difficulty: 期望难度
         """
+        try:
+            query, difficulty = validate_retrieve_questions_args(query, difficulty)
+        except ToolValidationError as exc:
+            return exc.to_tool_result()
+
         print(f"\n{'='*60}")
         print(f"[retrieve_questions] query={query} difficulty={difficulty}")
         try:
             results = await search_questions(
                 query=query,
-                difficulty=difficulty if difficulty in ("easy", "medium", "hard") else None,
+                difficulty=difficulty,
                 k=5,
                 rerank=True,
                 over_fetch=30,
@@ -247,6 +380,20 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
             depth: 新深度 0-1
             impression: 对该技能的整体印象
         """
+        try:
+            args = validate_skill_update_args(
+                skill_path=skill_path,
+                confidence=confidence,
+                depth=depth,
+                impression=impression,
+            )
+            skill_path = args["skill_path"]
+            confidence = args["confidence"]
+            depth = args["depth"]
+            impression = args["impression"]
+        except ToolValidationError as exc:
+            return exc.to_tool_result()
+
         ctx.profile.update_skill(
             skill_path=skill_path, confidence=confidence, depth=depth, comment=impression,
         )
@@ -262,9 +409,21 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
         Args:
             summary: 候选人能力简要总结
         """
+        try:
+            summary = _clean_text(summary, "summary", max_length=MAX_TOOL_TEXT_LENGTH, required=True)
+            assert_can_perform(ctx.session.status, ACTION_END)
+        except ToolValidationError as exc:
+            return exc.to_tool_result()
+        except Exception as exc:
+            return ToolValidationError(
+                "tool_invalid_state",
+                "Current interview state does not allow ending the interview.",
+                {"status": ctx.session.status},
+            ).to_tool_result()
+
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        ctx.session.status = "completed"
+        ctx.session.status = next_status_for(ACTION_END)
         ctx.session.completed_at = now
         if ctx.session.started_at:
             s = ctx.session.started_at
@@ -274,15 +433,16 @@ def make_interview_agent(ctx: ReactContext, system_prompt: str):
         await ctx.db.flush()
         ctx.is_ended = True
         ctx.profile.impression = summary
+        ctx.session.report_status = "pending"
+        ctx.session.report_error = None
+        await ctx.db.commit()
         try:
-            from app.agent.report import generate_report as _gen
-            report = await _gen(ctx.db, ctx.session.id)
-            await ctx.db.commit()
-            ctx.report_id = report.id
-            return f"面试结束，报告已生成"
+            import asyncio
+            from app.services.report_service import generate_report_background
+            asyncio.create_task(generate_report_background(ctx.session.id))
         except Exception:
-            await ctx.db.commit()
-            return "面试结束"
+            logger.warning("Failed to schedule report generation", exc_info=True)
+        return "面试结束，报告正在生成"
 
     # ── Build agent ──────────────────────────────────────────
 

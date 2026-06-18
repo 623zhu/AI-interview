@@ -6,6 +6,9 @@
 # ── Python ─────────────────────────────────────────
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 *.egg-info/
 dist/
 build/
@@ -29,6 +32,7 @@ dist/
 .next/
 
 # ── IDE ────────────────────────────────────────────
+.idea/
 .vscode/
 *.swp
 *.swo

@@ -5,6 +5,12 @@
       <div class="ir-header__left">
         <span class="ir-header__title">{{ jobTitle || '模拟面试' }}</span>
       </div>
+      <div class="ir-header__center">
+        <span class="ir-header__metric">状态：{{ statusLabel }}</span>
+        <span class="ir-header__metric">题目：{{ turnNumber || 0 }}{{ maxTurns ? ` / ${maxTurns}` : '' }}</span>
+        <span class="ir-header__metric">已回答：{{ answeredCount }}</span>
+        <span class="ir-header__metric">用时：{{ elapsedText }}</span>
+      </div>
       <div class="ir-header__right">
         <el-button
           v-if="status === 'in_progress'"
@@ -40,7 +46,7 @@
         </div>
         <div class="ir-msg__body">
           <div class="ir-msg__role">{{ msg.role === 'ai' ? '面试官' : '我' }}</div>
-          <div class="ir-msg__content" v-html="msg.content"></div>
+          <div class="ir-msg__content">{{ msg.content }}</div>
         </div>
       </div>
 
@@ -106,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
@@ -122,8 +128,10 @@ const sessionId = route.params.id as string
 // State
 const status = ref<string>('created')
 const jobTitle = ref('')
-const currentQ = ref(1)
-const totalQ = ref(7)
+const turnNumber = ref(0)
+const answeredCount = ref(0)
+const maxTurns = ref<number | null>(null)
+const elapsedSeconds = ref(0)
 const connecting = ref(true)
 const thinking = ref(false)
 const inputText = ref('')
@@ -133,6 +141,35 @@ const chatRef = ref<HTMLElement | null>(null)
 // Voice input
 const recording = ref(false)
 let recognition: any = null
+let elapsedTimer: number | null = null
+
+const statusLabel = computed(() => {
+  const labels: Record<string, string> = {
+    created: '待开始',
+    in_progress: '进行中',
+    completed: '已完成',
+  }
+  return labels[status.value] || status.value
+})
+
+const elapsedText = computed(() => {
+  const minutes = Math.floor(elapsedSeconds.value / 60).toString().padStart(2, '0')
+  const seconds = (elapsedSeconds.value % 60).toString().padStart(2, '0')
+  return `${minutes}:${seconds}`
+})
+
+function startElapsedTimer() {
+  if (elapsedTimer != null) return
+  elapsedTimer = window.setInterval(() => {
+    if (status.value === 'in_progress') elapsedSeconds.value += 1
+  }, 1000)
+}
+
+function stopElapsedTimer() {
+  if (elapsedTimer == null) return
+  window.clearInterval(elapsedTimer)
+  elapsedTimer = null
+}
 
 function startRecording() {
   if (thinking.value) return
@@ -175,15 +212,34 @@ function speakText(text: string) {
 
 let abortController: AbortController | null = null
 
+function applyProgress(data: any) {
+  if (!data) return
+  if (data.max_turns != null) maxTurns.value = Number(data.max_turns)
+  if (data.turn_number != null) turnNumber.value = Math.max(turnNumber.value, Number(data.turn_number))
+  if (data.current_question != null) turnNumber.value = Math.max(turnNumber.value, Number(data.current_question))
+  if (data.answered_count != null) answeredCount.value = Math.max(answeredCount.value, Number(data.answered_count))
+}
+
+async function loadSessionState() {
+  try {
+    const res = await apiClient.get(`/interviews/${sessionId}`)
+    const data = res.data?.data || {}
+    status.value = data.status || status.value
+    applyProgress(data)
+    if (data.duration_seconds != null) elapsedSeconds.value = Number(data.duration_seconds)
+  } catch { /* ignore */ }
+}
+
 // Load existing messages when resuming an interview
 async function loadExistingMessages() {
   try {
     const res = await apiClient.get(`/interviews/${sessionId}/messages`)
-    const msgs = res.data?.data || res.data || []
+    const msgs = (res.data?.data || res.data || []).filter((m: any) => m.role === 'ai' || m.role === 'user')
     for (const m of msgs) {
       messages.value.push({ role: m.role, content: m.content })
     }
-    totalQ.value = msgs.length > 0 ? Math.max(2, Math.ceil(msgs.length / 2)) : 2
+    answeredCount.value = Math.max(answeredCount.value, msgs.filter((m: any) => m.role === 'user').length)
+    turnNumber.value = Math.max(turnNumber.value, msgs.filter((m: any) => m.role === 'ai').length)
     scrollToBottom()
   } catch { /* ignore */ }
 }
@@ -287,8 +343,7 @@ async function handleSSEEvent(data: any) {
         messages.value.push({ role: 'ai', content: payload.content })
       }
       if (payload.content) speakText(payload.content)
-      if (payload.question_number) currentQ.value = payload.question_number
-      if (payload.total_questions) totalQ.value = payload.total_questions
+      applyProgress(payload)
       scrollToBottom()
       break
 
@@ -299,6 +354,7 @@ async function handleSSEEvent(data: any) {
     case 'done':
       status.value = 'completed'
       thinking.value = false
+      stopElapsedTimer()
       localStorage.removeItem('active_interview')
       abortController?.abort()
       // Navigate to report after short delay (let backend finish generating)
@@ -325,14 +381,17 @@ async function startInterview() {
       const d = json.data
       status.value = 'in_progress'
       connecting.value = false
+      startElapsedTimer()
+      if (d.max_turns != null) maxTurns.value = Number(d.max_turns)
       if (d.resume) {
         // Resume existing interview — load history messages
+        await loadSessionState()
         await loadExistingMessages()
         return
       }
-      currentQ.value = 1
       if (d.first_question) {
-        totalQ.value = d.first_question.total_questions || 7
+        applyProgress(d.first_question)
+        turnNumber.value = Math.max(turnNumber.value, 1)
         await streamText(d.first_question.content)
       }
     } else if (res.status === 404) {
@@ -357,6 +416,7 @@ async function handleSend() {
   if (!text || thinking.value) return
 
   messages.value.push({ role: 'user', content: text })
+  answeredCount.value += 1
   inputText.value = ''
   scrollToBottom()
   thinking.value = true
@@ -400,9 +460,9 @@ async function handleSkip() {
     const res = await apiPost(`/interviews/${sessionId}/skip`)
     const json = await res.json()
     if (json.code === 200) {
-      currentQ.value = Math.min(currentQ.value + 1, totalQ.value)
       messages.value.push({ role: 'ai', content: '⏭ 已跳过此题' })
       if (json.data.next_question?.content) {
+        applyProgress(json.data.next_question)
         messages.value.push({ role: 'ai', content: json.data.next_question.content })
       }
       scrollToBottom()
@@ -433,6 +493,7 @@ async function handleEnd() {
     const json = await res.json()
     if (json.code === 200) {
       status.value = 'completed'
+      stopElapsedTimer()
       localStorage.removeItem('active_interview')
       abortController?.abort()
       ElMessage.success('报告已生成')
@@ -446,6 +507,7 @@ async function handleEnd() {
 
 onMounted(() => {
   localStorage.setItem('active_interview', sessionId)
+  loadSessionState()
   startInterview()
 })
 watch(() => route.params.id, () => {
@@ -454,6 +516,7 @@ watch(() => route.params.id, () => {
 
 onUnmounted(() => {
   abortController?.abort()
+  stopElapsedTimer()
   if (status.value === 'completed') {
     localStorage.removeItem('active_interview')
   }
@@ -468,7 +531,7 @@ onUnmounted(() => {
 
 /* Header */
 .ir-header {
-  display: flex; align-items: center; justify-content: flex-end;
+  display: flex; align-items: center; justify-content: space-between;
   padding: 8px 20px; flex-shrink: 0;
 }
 
@@ -489,7 +552,7 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.ir-header__progress {
+.ir-header__metric {
   font-size: 13px;
   color: #666;
   white-space: nowrap;

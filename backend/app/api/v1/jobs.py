@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.api.deps import get_current_user, get_current_admin
 from app.models.user import User
 from app.models.job_position import JobPosition
+from app.models.interview_session import InterviewSession
 from app.schemas.job import (
     JobOut, JobListItem,
     JobCreate, JobUpdate,
@@ -139,11 +140,24 @@ async def delete_job(
     job_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """[Admin] Hard-delete a job position."""
+    """[Admin] Delete a job position, disabling it if historical interviews reference it."""
     result = await db.execute(select(JobPosition).where(JobPosition.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="岗位不存在")
+
+    refs = await db.execute(
+        select(func.count(InterviewSession.id)).where(InterviewSession.job_id == job.id)
+    )
+    ref_count = refs.scalar() or 0
+    if ref_count > 0:
+        job.is_active = False
+        await db.flush()
+        return {
+            "code": 200,
+            "message": "岗位已被历史面试引用，已改为禁用",
+            "data": {"id": job.id, "is_active": job.is_active, "referenced_interviews": ref_count},
+        }
 
     await db.delete(job)
     await db.flush()
@@ -170,6 +184,5 @@ async def toggle_job(
         "data": {"id": job.id, "is_active": job.is_active},
         "message": "已启用" if job.is_active else "已禁用",
     }
-
 
 

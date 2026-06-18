@@ -1,159 +1,282 @@
 # AI-Interview
 
-基于 LLM 智能体的 AI 模拟面试平台。系统通过 ReAct Agent 驱动面试对话，结合 RAG 语义检索题目、实时评分画像构建，为候选人提供接近真实的面试体验。
+AI-Interview 是一个基于 LLM 智能体的模拟面试平台。项目核心不是固定题库问答，而是由面试智能体根据候选人的简历、目标岗位、历史回答和实时能力画像，动态检索题目、追问、评估回答并生成面试报告。
+
+当前重点能力：
+
+- ReAct 面试智能体：通过工具调用完成回答评估、RAG 出题、画像更新和面试结束决策。
+- RAG 题库检索：面试过程中按岗位、简历和回答语义实时检索题目，而不是创建面试时预选固定题。
+- 结构化输出隔离：模型最终输出必须包含 `candidate_message`，后端只展示候选人可见内容，防止内部推理泄漏。
+- 安全兜底：结构化输出不合格时 retry，一次失败后优先从 RAG 候选题中选择原题兜底。
+- 实时画像：每轮回答都会更新候选人的技能掌握度、深度、短板和整体印象。
+- SSE 流式对话：面试官问题逐字推送，前端提供接近实时对话体验。
+
+## 智能体架构
+
+```text
+Candidate Answer
+      |
+      v
+Interview Agent (LangGraph ReAct)
+      |
+      |-- evaluate_answer
+      |      评估回答，写入本轮评语和能力画像
+      |
+      |-- retrieve_questions
+      |      根据追问意图从 Chroma 题库检索候选题
+      |
+      |-- update_profile
+      |      更新候选人的技能掌握度、深度、短板
+      |
+      |-- end_interview
+      |      结束面试并触发报告生成
+      |
+      v
+Structured Output
+      |
+      |-- candidate_message  -> 返回前端
+      |-- internal_note      -> 仅用于后端日志，不展示
+      |
+      v
+SSE Stream -> Frontend
+```
+
+## 面试智能体
+
+面试智能体位于 `backend/app/agent/interview_agent.py`，工具定义位于 `backend/app/agent/tools.py`。
+
+每一轮对话的核心流程：
+
+1. 加载会话信息、简历摘要、岗位技能树、最近对话和候选人画像。
+2. Agent 根据用户回答调用 `evaluate_answer`，生成本轮评价并更新画像。
+3. Agent 决定继续追问、切换技能方向或结束面试。
+4. 若需要继续提问，调用 `retrieve_questions` 从 RAG 题库拿候选题。
+5. Agent 结构化输出下一题，后端只读取 `candidate_message`。
+6. 后端通过 SSE 将问题流式推送给前端，并保存为面试消息。
+
+### 工具调用
+
+| Tool | 作用 |
+| --- | --- |
+| `evaluate_answer` | 对候选人回答进行点评，更新 confidence、depth、gaps 等能力画像字段 |
+| `retrieve_questions` | 根据本轮追问意图检索题库，返回 3-5 道候选题，并过滤已问过的问题 |
+| `update_profile` | 直接调整候选人画像，用于补充整体印象或技能判断 |
+| `end_interview` | 结束面试，写入完成状态并触发报告生成 |
+
+## 结构化输出隔离
+
+LLM 不能只靠提示词保证永远输出正确格式，因此后端增加了强约束解析和兜底链路。
+
+Agent 最终回复要求为 JSON：
+
+```json
+{
+  "action": "ask_next",
+  "candidate_message": "真正说给候选人的一句面试问题",
+  "internal_note": "选题依据、选择了第几题、如何微调措辞等内部说明"
+}
+```
+
+后端策略：
+
+- 只展示 `candidate_message`。
+- `internal_note` 不会返回前端，也不会保存为候选人可见对话。
+- 若模型输出 Markdown、代码块或括号内内部说明，后端会清洗。
+- 若 JSON 解析失败或 `candidate_message` 不合格，触发一次 retry。
+- retry 仍不合格时，优先使用本轮 RAG 候选池中的第一道干净原题。
+- 如果本轮没有 RAG 候选题，才使用通用项目追问作为最后兜底。
+
+这条链路用于避免下面这类内容泄漏给候选人：
+
+```text
+（我选第0题微调措辞，结合他项目里提到的记忆系统设计来问）
+```
+
+## RAG 出题机制
+
+题目不是在创建面试时固定生成，而是在面试过程中由 Agent 实时检索。
+
+```text
+Agent 追问意图
+      |
+      v
+Embedding Query
+      |
+      v
+Chroma Vector Search
+      |
+      v
+Optional Reranker
+      |
+      v
+Top Candidate Questions
+      |
+      v
+Agent 选择并组织 candidate_message
+```
+
+特点：
+
+- 题目存储在 MySQL，语义索引存储在 Chroma。
+- 检索输入来自 Agent 对当前回答的追问意图。
+- 通过 `InterviewQuestionLink` 记录已问题目，避免同一场面试重复提问。
+- 可选 reranker 对向量召回结果进行二次排序。
+- 兜底问题优先来自本轮 RAG 候选题，保证问题仍然来自可维护题库。
+
+## 候选人画像
+
+系统会在面试过程中持续维护 `CandidateProfile`：
+
+```json
+{
+  "skills": {
+    "Backend/RAG/Evaluation": {
+      "confidence": 0.6,
+      "depth": 0.5,
+      "comments": ["回答覆盖了召回率和命中率，但缺少负样本构造细节"],
+      "gaps": ["缺少离线评估集构造经验"],
+      "asked": 2
+    }
+  },
+  "impression": "候选人有工程经验，但评估体系仍需追问",
+  "current_target": "Backend/RAG/Evaluation"
+}
+```
+
+当前画像保存在 Redis，设置 24 小时 TTL。它用于跨轮次指导追问方向，而不是把完整历史无限堆进 prompt。
+
+## 面试状态与并发控制
+
+系统为面试流程增加了状态机和会话锁：
+
+- `created`：面试已创建，尚未开始。
+- `in_progress`：面试进行中。
+- `completed`：面试完成，报告生成中或已生成。
+- `cancelled`：面试取消或删除。
+
+对 `start/chat/skip/end` 等操作会加 Redis 会话锁，避免用户重复点击或并发请求导致状态错乱。
+
+## 报告生成
+
+面试结束后，系统会异步生成报告：
+
+- 汇总完整 Q&A 轮次。
+- 合并每轮评价和候选人画像。
+- 给出优点、不足和改进建议。
+- 报告查询接口只负责查询，不在读取时隐式生成报告。
+
+报告状态由 `report_status` 和 `report_error` 维护，前端可展示生成中、成功、失败和重试状态。
 
 ## 系统架构
 
+```text
+Frontend (Vue 3 + TypeScript + Element Plus)
+      |
+      | REST / SSE
+      v
+Backend (FastAPI)
+      |
+      |-- Auth / Resume / Job / Interview / Report APIs
+      |-- Interview Agent (LangGraph ReAct)
+      |-- RAG Search (Chroma + optional reranker)
+      |-- Report Service
+      |
+      v
+MySQL       Redis       Chroma
+Users       Session     Question vectors
+Resumes     Profile     Semantic search
+Jobs        Locks
+Messages
+Reports
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Frontend (Vue 3 + TypeScript + Element Plus)                   │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ SSE / REST
-┌────────────────────────▼────────────────────────────────────────┐
-│  Backend (FastAPI)                                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐ │
-│  │ Interview    │  │ Resume Parse │  │ Report Generator      │ │
-│  │ Agent (ReAct)│  │ Agent        │  │ (数据编排)             │ │
-│  └──────┬───────┘  └──────────────┘  └───────────────────────┘ │
-│         │                                                       │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌───────────────────────┐ │
-│  │ LangGraph    │  │ RAG Module   │  │ Reranker              │ │
-│  │ (ReAct Loop) │  │ (Chroma)     │  │ (BGE-reranker-v2-m3) │ │
-│  └──────────────┘  └──────────────┘  └───────────────────────┘ │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-       ┌─────────────────┼─────────────────┐
-       ▼                 ▼                 ▼
-┌─────────────┐  ┌─────────────┐  ┌─────────────────┐
-│ MySQL 8.0   │  │ Redis 7     │  │ Chroma (Vector) │
-│ (持久存储)   │  │ (画像缓存)   │  │ (语义检索)      │
-└─────────────┘  └─────────────┘  └─────────────────┘
-```
-
-## 核心智能体
-
-### 1. Interview Agent (面试智能体)
-
-基于 **LangGraph ReAct** 范式构建的面试官智能体，是系统的核心组件。
-
-**工作流程：**
-
-1. 从 Redis 加载候选人画像（技能评估、整体印象）
-2. 组装上下文：岗位技能树 + 简历摘要 + 对话历史 + 当前画像
-3. 进入 ReAct 循环，通过 Tool Calling 驱动面试
-4. 逐 token 通过 SSE 流式推送至前端
-5. 每轮结束后将更新的画像持久化到 Redis（TTL 24h）
-
-**可用工具（Tools）：**
-
-| 工具 | 功能 |
-|------|------|
-| `evaluate_answer` | 评估候选人回答：打分（confidence/depth）+ 评语 + 更新画像 |
-| `retrieve_questions` | 语义检索题目池，返回 3-5 道候选题（自动去重已问题目） |
-| `update_profile` | 直接调整画像（无需详细评语） |
-| `end_interview` | 结束面试，触发报告生成 |
-
-**设计特点：**
-- 画像跨轮次累积：通过 Redis 持久化 `CandidateProfile`，面试过程中逐步构建候选人技能图谱
-- 技能树引导：基于岗位 `skill_tree`（层级 JSON）引导面试方向
-- 自适应追问：根据回答质量决定深入追问或切换方向
-- SSE 流式输出：实时 token 推送，前端逐字展示
-
-### 2. Resume Parse Agent (简历解析智能体)
-
-基于 LLM 的结构化信息提取，将非结构化简历文本转为标准 JSON。
-
-- 支持 PDF / DOCX 格式上传
-- 提取：个人信息、技能、工作经历、项目经历、教育背景等
-- 严格约束：不编造信息，无信息则填 null
-
-### 3. 报告生成模块
-
-面试结束后，从对话记录中编排 Q&A 轮次，拼接评语，生成结构化 Markdown 面试报告。该模块是纯数据编排逻辑，不涉及 LLM 调用或 Agent 循环。
-
-## RAG 语义检索
-
-面试题目的检索采用两阶段 Retrieve-Rerank 架构：
-
-```
-用户意图（Agent决策）
-    │
-    ▼ Embedding (Ollama + bge-m3, dim=1024)
-    │
-    ▼ Vector Search (Chroma, top-k=20)
-    │
-    ▼ Cross-Encoder Rerank (BAAI/bge-reranker-v2-m3)
-    │
-    ▼ 返回 Top 3-5 候选题目
-```
-
-- 题目入库时按 `category | job_category | difficulty | content` 拼接为嵌入文本
-- 支持按分类/难度进行预过滤
-- Reranker 为可选组件，缺失时降级为纯向量 top-k
 
 ## 技术栈
 
 ### 后端
 
-| 层级 | 技术 |
-|------|------|
-| Web 框架 | FastAPI 0.115 + Uvicorn (全异步) |
-| Agent 框架 | LangGraph 0.2 + LangChain 0.3 |
-| LLM | DeepSeek (OpenAI 兼容接口) |
-| 向量嵌入 | Ollama + bge-m3 (1024 维) |
-| 重排序 | FlagEmbedding / bge-reranker-v2-m3 |
-| 向量数据库 | Chroma 0.5 |
-| 关系数据库 | MySQL 8.0 + SQLAlchemy (async) |
-| 缓存 | Redis 7 |
-| 认证 | JWT + bcrypt |
-| 文件解析 | PyPDF2 + pdfplumber + python-docx |
+| 模块 | 技术 |
+| --- | --- |
+| Web API | FastAPI + Uvicorn |
+| Agent | LangGraph + LangChain |
+| LLM | DeepSeek OpenAI-compatible API |
+| ORM | SQLAlchemy Async |
+| Migration | Alembic |
+| Database | MySQL |
+| Cache / Lock | Redis |
+| Vector DB | Chroma |
+| Embedding | Ollama bge-m3 |
+| Rerank | FlagEmbedding / bge-reranker-v2-m3 |
+| Auth | JWT + bcrypt |
+| Test | pytest |
 
 ### 前端
 
-| 层级 | 技术 |
-|------|------|
-| 框架 | Vue 3 + TypeScript |
-| 构建工具 | Vite 5 |
-| UI 组件库 | Element Plus |
-| 状态管理 | Pinia |
-| 图表 | ECharts 5 |
-| 通信 | Axios + SSE (EventSource) |
+| 模块 | 技术 |
+| --- | --- |
+| Framework | Vue 3 + TypeScript |
+| Build | Vite |
+| UI | Element Plus |
+| State | Pinia |
+| Charts | ECharts |
+| Request | Axios + Fetch SSE |
 
 ## 数据模型
 
-核心实体关系：
+```text
+User
+  |-- Resume
+  |-- InterviewSession
+        |-- InterviewMessage
+        |-- InterviewQuestionLink
+        |-- ScoreReport
 
-```
-User ──┬── Resume ──── ResumeJobMatch ──── JobPosition
-       │                                       │
-       └── InterviewSession ──────────────────┘
-               │
-               ├── InterviewMessage (对话记录)
-               ├── InterviewQuestionLink (已问题目)
-               └── ScoreReport (面试报告)
+JobPosition
+  |-- InterviewSession
+
+Question
+  |-- InterviewQuestionLink
 ```
 
-`JobPosition.skill_tree` 示例：
-```json
-{
-  "domains": [
-    {
-      "name": "后端开发",
-      "weight": 0.4,
-      "skills": [
-        {
-          "name": "Python",
-          "level": "senior",
-          "children": [
-            { "name": "异步编程" },
-            { "name": "类型系统" }
-          ]
-        }
-      ]
-    }
-  ]
-}
+核心表：
+
+- `users`：用户与管理员账号。
+- `resumes`：简历文件和解析结果。
+- `job_positions`：岗位、技能树和岗位要求。
+- `questions`：题库原题、参考答案、评分点。
+- `interview_sessions`：面试会话、状态、进度和报告生成状态。
+- `interview_messages`：面试官和候选人的完整对话。
+- `interview_question_links`：单场面试已使用题目。
+- `score_reports`：面试报告。
+
+## API 概览
+
+| 模块 | 路径 | 说明 |
+| --- | --- | --- |
+| Auth | `/api/v1/auth/*` | 注册、登录、刷新 token、退出登录 |
+| Resumes | `/api/v1/resumes/*` | 上传、解析、列表、鉴权下载 |
+| Jobs | `/api/v1/jobs/*` | 岗位列表、详情、管理 |
+| Interviews | `/api/v1/interviews/*` | 创建、开始、流式对话、跳过、结束、删除 |
+| Reports | `/api/v1/reports/*` | 报告查询与生成状态 |
+| Questions | `/api/v1/questions/*` | 管理员题库管理 |
+| Admin | `/api/v1/admin/*` | 后台看板与用户管理 |
+
+面试流式对话：
+
+```text
+POST /api/v1/interviews/{session_id}/chat/stream
 ```
+
+主要 SSE 事件：
+
+| Event | 说明 |
+| --- | --- |
+| `status` | 本轮处理状态 |
+| `score` | 本轮回答评价，仅用于报告和画像，不展示给候选人 |
+| `profile` | 候选人画像更新 |
+| `token` | 面试官问题逐字流式输出 |
+| `question` | 本轮问题结束，返回题目元数据 |
+| `done` | 面试结束 |
+| `error` | 可恢复错误或失败原因 |
 
 ## 快速开始
 
@@ -163,39 +286,27 @@ User ──┬── Resume ──── ResumeJobMatch ──── JobPosition
 - Node.js 18+
 - MySQL 8.0
 - Redis 7
-- Ollama（运行 bge-m3 嵌入模型）
+- Ollama，需安装 `bge-m3`
 
-### 1. 启动基础设施
-
-```bash
-cd backend
-docker-compose up -d  # MySQL + Redis
-```
-
-### 2. 启动 Ollama 嵌入服务
-
-```bash
-ollama pull bge-m3
-ollama serve
-```
-
-### 3. 后端
+### 后端
 
 ```bash
 cd backend
 pip install -r requirements.txt
 
-# 配置环境变量
-cp .env.example .env  # 填写 DEEPSEEK_API_KEY 等
+# 复制并填写配置
+cp .env.example .env
 
 # 数据库迁移
-alembic upgrade head
+cd alembic
+python -m alembic upgrade head
+cd ..
 
 # 启动服务
-python main.py
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 4. 前端
+### 前端
 
 ```bash
 cd frontend
@@ -203,61 +314,70 @@ npm install
 npm run dev
 ```
 
-访问 `http://localhost:5173` 开始使用。
+前端默认访问：
 
-## API 概览
-
-| 模块 | 路径 | 说明 |
-|------|------|------|
-| 认证 | `/api/v1/auth/*` | 注册、登录、Token 刷新 |
-| 简历 | `/api/v1/resumes/*` | 上传、解析、列表 |
-| 岗位 | `/api/v1/jobs/*` | 岗位列表与搜索 |
-| 面试 | `/api/v1/interviews/*` | 创建/开始/对话(SSE)/结束 |
-| 题库 | `/api/v1/questions/*` | 题目管理（管理员） |
-| 报告 | `/api/v1/reports/*` | 面试报告查看 |
-| 看板 | `/api/v1/dashboard/*` | 数据统计 |
-
-**面试对话接口**（SSE 事件流）：
-
+```text
+http://localhost:5173
 ```
-POST /api/v1/interviews/{session_id}/chat
 
-SSE Events:
-  status    → 处理状态
-  action    → Agent 工具调用
-  score     → 评分结果
-  profile   → 画像更新
-  token     → 逐字流式输出
-  question  → 下一个问题（含元数据）
-  done      → 面试结束
+后端健康检查：
+
+```text
+GET http://localhost:8000/health
+GET http://localhost:8000/ready
+```
+
+## 常用命令
+
+后端测试：
+
+```bash
+cd backend
+python -m pytest
+```
+
+前端构建：
+
+```bash
+cd frontend
+npm run build
+```
+
+题库初始化与同步：
+
+```bash
+cd backend
+python manage.py seed-questions
+python manage.py sync-questions
 ```
 
 ## 项目结构
 
-```
+```text
 backend/
-├── app/
-│   ├── agent/          # 智能体核心
-│   │   ├── interview_agent.py   # 面试智能体（ReAct 主循环）
-│   │   ├── tools.py             # Agent 工具定义
-│   │   ├── rag.py               # RAG 语义检索
-│   │   ├── parse_agent.py       # 简历解析智能体
-│   │   ├── report.py            # 面试报告生成（数据编排）
-│   │   └── prompts.py           # 系统提示词
-│   ├── api/v1/         # REST API 路由
-│   ├── core/           # 基础设施
-│   │   ├── llm.py               # LLM 客户端（DeepSeek）
-│   │   ├── embedding.py         # 嵌入模型（Ollama）
-│   │   ├── reranker.py          # 重排序模型
-│   │   ├── chroma.py            # 向量数据库
-│   │   ├── database.py          # MySQL 连接
-│   │   └── config.py            # 全局配置
-│   ├── models/         # SQLAlchemy ORM 模型
-│   ├── schemas/        # Pydantic 请求/响应 Schema
-│   └── services/       # 业务逻辑层
-├── alembic/            # 数据库迁移
-├── eval/               # RAG 评估工具
-├── docker-compose.yml
-└── requirements.txt
+  app/
+    agent/
+      interview_agent.py   # 面试智能体主流程
+      tools.py             # ReAct 工具定义
+      rag.py               # RAG 检索
+      prompts.py           # 智能体提示词
+      report.py            # 报告内容编排
+    api/v1/                # REST API
+    core/                  # 配置、数据库、Redis、LLM、健康检查、日志
+    models/                # SQLAlchemy 模型
+    schemas/               # Pydantic Schema
+    services/              # 业务服务
+  alembic/                 # 数据库迁移
+  eval/rag/                # RAG 评估工具
+  tests/                   # pytest 测试
+
+frontend/
+  src/
+    views/user/InterviewRoomView.vue
+    views/user/
+    views/admin/
+    api/
+    stores/
 ```
+
 

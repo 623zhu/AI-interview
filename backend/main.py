@@ -2,13 +2,19 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 import os
 
 from app.core.config import settings
-from app.core.database import engine, Base
-from app.core.redis import close_redis
+from app.core.database import engine
+from app.core.errors import install_exception_handlers
+from app.core.health import health_payload, readiness_payload
+from app.core.logging import configure_logging
+from app.core.observability import RequestIDMiddleware
+from app.core.redis import close_redis, get_redis
 from app.api.v1 import auth, resumes, jobs, questions, interviews, reports, dashboard, admin
+
+configure_logging(settings.LOG_LEVEL)
 
 
 @asynccontextmanager
@@ -17,10 +23,6 @@ async def lifespan(app: FastAPI):
     # Startup
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.CHROMA_PERSIST_DIR, exist_ok=True)
-
-    # Create database tables (for dev; use Alembic in production)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
     yield
 
@@ -35,6 +37,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestIDMiddleware)
+install_exception_handlers(app)
+
 # CORS
 origins = [o.strip() for o in settings.CORS_ORIGINS.split(",")]
 app.add_middleware(
@@ -45,9 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount uploads directory for file serving
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Include API routers
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
@@ -63,4 +66,11 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
+    return health_payload()
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness check endpoint for dependency availability."""
+    status_code, payload = await readiness_payload(engine=engine, redis_factory=get_redis)
+    return JSONResponse(status_code=status_code, content=payload)

@@ -1,32 +1,53 @@
 """Interview endpoints: create, start, chat (SSE), skip, end."""
 import json
-import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.core.database import get_db
+from app.core.interview_state import (
+    ACTION_CHAT,
+    ACTION_DELETE,
+    ACTION_END,
+    ACTION_SKIP,
+    ACTION_START,
+    STATUS_IN_PROGRESS,
+    assert_can_perform,
+    next_status_for,
+)
 from app.core.redis import get_redis
+from app.core.session_lock import acquire_session_lock, release_session_lock
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.resume import Resume
 from app.models.job_position import JobPosition
-from app.models.question import Question
 from app.models.interview_session import InterviewSession, InterviewMessage
-from app.agent.rag import search_questions
 from app.schemas.interview import (
     InterviewCreateRequest, InterviewSessionOut,
-    ChatRequest, StartInterviewResponse,
+    ChatRequest,
 )
 from app.agent.interview_agent import InterviewManager
-from app.agent.report import generate_report as generate_score_report
-from app.utils.resume_utils import build_resume_context
+from app.services.report_service import generate_report_background, mark_report_pending
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
+
+
+def _session_busy_error() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail="当前面试正在处理上一项操作，请稍后再试",
+    )
+
+
+async def _locked_stream(redis: Redis, session_id: str, token: str, event_stream):
+    try:
+        async for event in event_stream:
+            yield event
+    finally:
+        await release_session_lock(redis, session_id, token)
 
 
 @router.get("")
@@ -56,16 +77,28 @@ async def list_interviews(
         .limit(page_size)
     )
     sessions = result.scalars().all()
+    session_ids = [s.id for s in sessions]
+    answered_counts = {}
+    if session_ids:
+        counts = await db.execute(
+            select(InterviewMessage.session_id, func.count(InterviewMessage.id))
+            .where(
+                InterviewMessage.session_id.in_(session_ids),
+                InterviewMessage.role == "user",
+                InterviewMessage.message_type == "answer",
+            )
+            .group_by(InterviewMessage.session_id)
+        )
+        answered_counts = {session_id: count for session_id, count in counts.all()}
 
     items = []
     for s in sessions:
-        print(f"[DEBUG] list interview {s.id[:8]}: status={s.status}")
         items.append({
             "id": s.id,
             "status": s.status,
             "job_title": s.job.title if s.job else None,
-            "total_questions": s.total_questions,
-            "current_question": s.current_question,
+            "answered_count": answered_counts.get(s.id, 0),
+            "max_turns": (s.config or {}).get("max_turns"),
             "duration_seconds": s.duration_seconds,
             "created_at": s.created_at.isoformat() if s.created_at else None,
         })
@@ -96,30 +129,18 @@ async def create_interview(
     if not resume:
         raise HTTPException(status_code=404, detail="简历不存在")
 
-    # Find or create job by title
+    # Verify selected job. Interviews can only use existing enabled jobs.
     result = await db.execute(
-        select(JobPosition).where(JobPosition.title == req.job_title)
+        select(JobPosition).where(JobPosition.id == req.job_id, JobPosition.is_active == True)
     )
     job = result.scalar_one_or_none()
     if not job:
-        # Create a job on-the-fly with the user's desired title
-        job = JobPosition(
-            title=req.job_title,
-            category="general",
-            level="mid",
-            requirements={},
-            is_active=True,
-        )
-        db.add(job)
-        await db.flush()
-        await db.refresh(job)
+        raise HTTPException(status_code=404, detail="岗位不存在或未启用")
 
-    # Build config
-    config = req.config or {
-        "question_count": 2,
-        "difficulty_distribution": {"easy": 1, "medium": 4, "hard": 2},
-        "max_duration_minutes": 45,
-        "enable_follow_up": True,
+    raw_config = req.config or {}
+    config = {
+        "max_turns": int(raw_config.get("max_turns", 12)),
+        "max_duration_minutes": int(raw_config.get("max_duration_minutes", 45)),
     }
 
     session = InterviewSession(
@@ -129,68 +150,12 @@ async def create_interview(
         status="created",
         config=config,
         questions=[],
-        total_questions=config.get("question_count", 7),
+        total_questions=0,
+        current_question=0,
     )
     db.add(session)
     await db.flush()
     await db.refresh(session)
-
-    # Pre-select questions from Chroma vector DB for this interview
-    total_q = session.total_questions
-    try:
-        # Build search query from job + resume context (including project experience)
-        resume_summary = ""
-        if resume.parsed_data:
-            rd = resume.parsed_data
-            parts = []
-            skills = rd.get("skills", [])
-            if skills:
-                parts.append("技能: " + ", ".join(skills[:8]))
-            # Include work experience for better question matching
-            work_exp = rd.get("work_experience") or rd.get("experience") or []
-            if isinstance(work_exp, list):
-                for exp in work_exp[:2]:
-                    if isinstance(exp, dict):
-                        exp_text = f"{exp.get('company','')} {exp.get('title','')} {exp.get('description','')[:150]}"
-                        parts.append(exp_text)
-            # Include personal projects
-            projects = rd.get("projects", [])
-            if isinstance(projects, list):
-                for proj in projects[:2]:
-                    if isinstance(proj, dict):
-                        proj_text = f"{proj.get('name','')} {proj.get('description','')[:100]}"
-                        parts.append(proj_text)
-            resume_summary = " | ".join(parts)
-
-        search_text = f"{job.title} {job.category} {resume_summary}"
-        rag_results = await search_questions(query=search_text, category=None, k=total_q + 3)
-
-        if rag_results:
-            questions = []
-            for i, r in enumerate(rag_results[:total_q + 3]):
-                mysql_id = r.metadata.get("mysql_id", "") if isinstance(r.metadata, dict) else ""
-                question_obj = None
-                if mysql_id:
-                    q_result = await db.execute(select(Question).where(Question.id == mysql_id))
-                    question_obj = q_result.scalar_one_or_none()
-
-                questions.append({
-                    "question_number": i + 1,
-                    "id": mysql_id,
-                    "content": question_obj.content if question_obj else "",
-                    "category": question_obj.category if question_obj else r.metadata.get("category", "") if isinstance(r.metadata, dict) else "",
-                    "difficulty": question_obj.difficulty if question_obj else r.metadata.get("difficulty", "medium") if isinstance(r.metadata, dict) else "medium",
-                })
-
-            session.questions = questions
-            await db.flush()
-            await db.refresh(session)
-            logger.info("Pre-selected %d questions from Chroma for interview %s", len(questions), session.id)
-        else:
-            logger.warning("Chroma returned no results for interview %s, questions will be generated by LLM", session.id)
-    except Exception as e:
-        logger.warning("Failed to pre-select questions from Chroma for interview %s: %s", session.id, e)
-        # session.questions stays as [] — fallback handled in interview agent
 
     return {
         "code": 201,
@@ -221,7 +186,7 @@ async def start_interview(
         raise HTTPException(status_code=400, detail="面试已结束")
 
     # If already in progress, return existing state without regenerating
-    if session.status == "in_progress":
+    if session.status == STATUS_IN_PROGRESS:
         return {
             "code": 200,
             "message": "面试继续",
@@ -232,8 +197,14 @@ async def start_interview(
             }
         }
 
+    assert_can_perform(session.status, ACTION_START)
+
+    lock_token = await acquire_session_lock(redis, session.id)
+    if not lock_token:
+        raise _session_busy_error()
+
     now = datetime.now(timezone.utc)
-    session.status = "in_progress"
+    session.status = next_status_for(ACTION_START)
     session.started_at = now
     await db.flush()
 
@@ -247,27 +218,25 @@ async def start_interview(
     db.add(sys_msg)
     await db.flush()
 
-    # Generate first question via ReAct Agent (opening turn)
-    manager = InterviewManager(db, redis)
     first_question_text = "你好！欢迎参加模拟面试。请先做一个简短的自我介绍吧。"
-
-    async for sse in manager.process_turn(session):
-        # Extract question content from SSE event
-        if '"event": "question"' in sse:
-            try:
-                event_data = json.loads(sse.removeprefix("data: "))
-                first_question_text = event_data["data"]["content"]
-            except Exception:
-                pass
+    session.current_question = 1
+    db.add(InterviewMessage(
+        session_id=session.id,
+        role="ai",
+        content=first_question_text,
+        message_type="question",
+        question_id=None,
+    ))
 
     await db.commit()
+    await release_session_lock(redis, session.id, lock_token)
 
     first_question = {
         "id": "intro",
         "content": first_question_text,
         "category": "basic",
-        "question_number": 1,
-        "total_questions": session.total_questions,
+        "turn_number": session.current_question,
+        "answered_count": 0,
     }
 
     return {
@@ -302,10 +271,14 @@ async def chat_stream(
     if not session:
         raise HTTPException(status_code=404, detail="面试会话不存在")
 
-    print(f"[DEBUG] chat_stream: current_question={session.current_question} total={session.total_questions}")
-
     if session.status != "in_progress":
         raise HTTPException(status_code=400, detail="面试未在进行中")
+
+    lock_token = await acquire_session_lock(redis, session.id)
+    if not lock_token:
+        raise _session_busy_error()
+
+    assert_can_perform(session.status, ACTION_CHAT)
 
     # Save user message
     user_msg = InterviewMessage(
@@ -322,7 +295,7 @@ async def chat_stream(
     event_stream = manager.process_turn(session, req.message, user_msg.id)
 
     return StreamingResponse(
-        event_stream,
+        _locked_stream(redis, session.id, lock_token, event_stream),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -350,8 +323,11 @@ async def skip_question(
     if not session:
         raise HTTPException(status_code=404, detail="面试会话不存在")
 
-    session.current_question += 1
-    next_q = session.current_question  # current_question 已自增，下一题直接用它
+    assert_can_perform(session.status, ACTION_SKIP)
+
+    lock_token = await acquire_session_lock(redis, session.id)
+    if not lock_token:
+        raise _session_busy_error()
 
     # Generate skip message
     skip_msg = InterviewMessage(
@@ -375,17 +351,19 @@ async def skip_question(
                 pass
 
     await db.commit()
+    await release_session_lock(redis, session.id, lock_token)
+    next_q = session.current_question
 
     return {
         "code": 200,
         "message": "已跳过当前题目",
         "data": {
-            "skipped_question_id": f"q{next_q - 1}",
+            "skipped_question_id": f"q{max(next_q - 1, 0)}",
             "next_question": {
                 "id": f"q{next_q}",
                 "content": next_question_text,
-                "question_number": next_q,
-                "total_questions": session.total_questions,
+                "turn_number": next_q,
+                "answered_count": max(next_q - 1, 0),
             }
         }
     }
@@ -394,8 +372,10 @@ async def skip_question(
 @router.post("/{session_id}/end")
 async def end_interview(
     session_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ):
     """End the interview."""
     result = await db.execute(
@@ -408,8 +388,14 @@ async def end_interview(
     if not session:
         raise HTTPException(status_code=404, detail="面试会话不存在")
 
+    assert_can_perform(session.status, ACTION_END)
+
+    lock_token = await acquire_session_lock(redis, session.id)
+    if not lock_token:
+        raise _session_busy_error()
+
     now = datetime.now(timezone.utc)
-    session.status = "completed"
+    session.status = next_status_for(ACTION_END)
     session.completed_at = now
     if session.started_at:
         # Convert naive started_at to aware if needed
@@ -420,34 +406,22 @@ async def end_interview(
         session.duration_seconds = int((now - started).total_seconds())
     await db.flush()
 
-    # Generate report
-    report_id = None
-    try:
-        report = await generate_score_report(db, session.id)
-        await db.commit()
-        report_id = report.id
-    except Exception:
-        await db.rollback()
-        # Save session as completed even if report fails
-        session = await db.get(InterviewSession, session_id)
-        if session:
-            session.status = "completed"
-            session.completed_at = now
-            if session.started_at:
-                session.duration_seconds = int((now - session.started_at).total_seconds())
-            await db.commit()
+    await mark_report_pending(db, session)
+    background_tasks.add_task(generate_report_background, session.id)
+    await release_session_lock(redis, session.id, lock_token)
 
     return {
         "code": 200,
-        "message": "面试已结束" + ("，报告已生成" if report_id else "，报告生成失败请稍后重试"),
+        "message": "面试已结束，报告正在生成",
         "data": {
             "session_id": session.id,
             "status": "completed",
             "completed_at": now.isoformat(),
             "duration_seconds": session.duration_seconds,
             "questions_answered": session.current_question,
-            "questions_skipped": session.total_questions - session.current_question,
-            "report_id": report_id,
+            "questions_skipped": 0,
+            "report_status": session.report_status,
+            "report_id": None,
         }
     }
 
@@ -461,7 +435,10 @@ async def get_interview_messages(
     """Get all messages for an interview session."""
     result = await db.execute(
         select(InterviewMessage)
-        .where(InterviewMessage.session_id == session_id)
+        .where(
+            InterviewMessage.session_id == session_id,
+            InterviewMessage.role.in_(("ai", "user")),
+        )
         .order_by(InterviewMessage.created_at)
     )
     messages = result.scalars().all()
@@ -496,6 +473,10 @@ async def get_interview(
         "data": {
             "id": session.id,
             "status": session.status,
+            "current_question": session.current_question,
+            "answered_count": session.current_question,
+            "max_turns": (session.config or {}).get("max_turns"),
+            "duration_seconds": session.duration_seconds,
         }
     }
 
@@ -517,6 +498,8 @@ async def delete_interview(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="面试记录不存在")
+
+    assert_can_perform(session.status, ACTION_DELETE)
 
     await db.delete(session)
     await db.flush()

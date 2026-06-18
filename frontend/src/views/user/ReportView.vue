@@ -7,8 +7,11 @@ import { useAuthStore } from '@/stores/auth'
 const route = useRoute()
 const authStore = useAuthStore()
 
-const reportId = computed(() => route.params.id as string)
+const sessionId = computed(() => route.params.id as string)
 const loading = ref(true)
+const retrying = ref(false)
+const reportStatus = ref<'pending' | 'generating' | 'completed' | 'failed' | 'missing'>('pending')
+const reportError = ref('')
 
 interface Round {
   question: string
@@ -24,23 +27,61 @@ async function fetchReport() {
   loading.value = true
   try {
     const token = authStore.accessToken
-    const res = await fetch(`/api/v1/reports/by-session/${reportId.value}`, {
+    const res = await fetch(`/api/v1/reports/by-session/${sessionId.value}`, {
       headers: { 'Authorization': `Bearer ${token}` },
     })
     if (res.ok) {
       const json = await res.json()
-      if (json.code === 200) report.value = json.data
-      else ElMessage.error('报告不存在')
+      if (json.code === 200) {
+        report.value = json.data
+        reportStatus.value = 'completed'
+        reportError.value = ''
+      } else if (json.code === 202) {
+        report.value = null
+        reportStatus.value = json.data?.status || 'pending'
+        reportError.value = json.data?.error || ''
+      } else {
+        report.value = null
+        reportStatus.value = 'missing'
+        reportError.value = json.data?.error || ''
+      }
+    } else if (res.status === 404) {
+      report.value = null
+      reportStatus.value = 'missing'
     }
   } catch { ElMessage.error('加载失败') }
   finally { loading.value = false }
+}
+
+async function requestGenerate() {
+  retrying.value = true
+  try {
+    const token = authStore.accessToken
+    const res = await fetch(`/api/v1/reports/generate/${sessionId.value}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+    const json = await res.json()
+    if (res.ok && (json.code === 202 || json.code === 200)) {
+      reportStatus.value = json.data?.status || 'pending'
+      reportError.value = ''
+      ElMessage.success('报告生成已提交')
+      await fetchReport()
+    } else {
+      ElMessage.error(json.detail || json.message || '提交失败')
+    }
+  } catch {
+    ElMessage.error('提交失败')
+  } finally {
+    retrying.value = false
+  }
 }
 
 onMounted(() => {
   fetchReport()
   window.dispatchEvent(new Event('refresh-history'))
 })
-watch(reportId, () => {
+watch(sessionId, () => {
   fetchReport()
   window.dispatchEvent(new Event('refresh-history'))
 })
@@ -86,6 +127,31 @@ watch(reportId, () => {
         </template>
       </div>
     </template>
+    <el-result
+      v-else-if="reportStatus === 'pending' || reportStatus === 'generating'"
+      icon="info"
+      title="报告生成中"
+      sub-title="面试回顾正在整理，请稍后刷新查看。"
+    >
+      <template #extra>
+        <el-button type="primary" :loading="loading" @click="fetchReport">刷新</el-button>
+      </template>
+    </el-result>
+    <el-result
+      v-else-if="reportStatus === 'failed'"
+      icon="error"
+      title="报告生成失败"
+      :sub-title="reportError || '可以重新提交生成任务。'"
+    >
+      <template #extra>
+        <el-button type="primary" :loading="retrying" @click="requestGenerate">重试生成</el-button>
+      </template>
+    </el-result>
+    <el-result v-else icon="warning" title="暂无报告">
+      <template #extra>
+        <el-button type="primary" :loading="retrying" @click="requestGenerate">生成报告</el-button>
+      </template>
+    </el-result>
   </div>
 </template>
 

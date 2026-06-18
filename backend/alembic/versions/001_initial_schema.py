@@ -130,6 +130,8 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime, default=None),
         sa.Column("completed_at", sa.DateTime, default=None),
         sa.Column("duration_seconds", sa.Integer, default=None),
+        sa.Column("report_status", sa.String(20), nullable=False, server_default="pending"),
+        sa.Column("report_error", sa.String(500), default=None),
         sa.Column("created_at", sa.DateTime, server_default=sa.func.current_timestamp()),
         sa.Column("updated_at", sa.DateTime, server_default=sa.func.current_timestamp(), onupdate=sa.func.current_timestamp()),
     )

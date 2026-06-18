@@ -3,7 +3,9 @@ import asyncio
 import os
 import uuid
 import logging
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +22,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 ALLOWED_TYPES = {"application/pdf": "pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx"}
+DOWNLOAD_MEDIA_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 MAX_SIZE = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
+def detect_resume_file_type(content: bytes) -> str | None:
+    """Detect supported resume file type by magic bytes."""
+    if content.startswith(b"%PDF-"):
+        return "pdf"
+    if content.startswith(b"PK\x03\x04") and _looks_like_docx(content):
+        return "docx"
+    return None
+
+
+def _looks_like_docx(content: bytes) -> bool:
+    # DOCX is a ZIP archive with Word document entries.
+    sample = content[:1024 * 1024]
+    return b"word/" in sample or b"[Content_Types].xml" in sample
 
 
 @router.post("/upload", status_code=201)
@@ -31,19 +52,24 @@ async def upload_resume(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a resume file (PDF/DOCX)."""
-    # Validate file type
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(status_code=400, detail=f"不支持的文件格式，请上传 PDF 或 DOCX")
-
     # Validate file size
     content = await file.read()
     if len(content) > MAX_SIZE:
         raise HTTPException(status_code=400, detail=f"文件大小不能超过 {settings.MAX_UPLOAD_SIZE_MB}MB")
+    if not content:
+        raise HTTPException(status_code=400, detail="文件不能为空")
+
+    detected_type = detect_resume_file_type(content)
+    if not detected_type:
+        raise HTTPException(status_code=400, detail="文件内容不是有效的 PDF 或 DOCX")
+    if file.content_type in ALLOWED_TYPES and ALLOWED_TYPES[file.content_type] != detected_type:
+        raise HTTPException(status_code=400, detail="文件内容与声明格式不一致")
 
     # Save file
-    file_ext = ALLOWED_TYPES[file.content_type]
+    file_ext = detected_type
     filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(settings.UPLOAD_DIR, filename)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
     with open(file_path, "wb") as f:
         f.write(content)
@@ -136,6 +162,37 @@ async def get_resume(
         "code": 200,
         "data": ResumeOut.model_validate(resume).model_dump()
     }
+
+
+@router.get("/{resume_id}/file")
+async def download_resume_file(
+    resume_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a resume file after ownership verification."""
+    result = await db.execute(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == current_user.id)
+    )
+    resume = result.scalar_one_or_none()
+    if not resume:
+        raise HTTPException(status_code=404, detail="简历不存在")
+
+    file_path = Path(resume.file_path).resolve()
+    upload_root = Path(settings.UPLOAD_DIR).resolve()
+    try:
+        file_path.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="简历文件路径非法")
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="简历文件不存在")
+
+    media_type = DOWNLOAD_MEDIA_TYPES.get(resume.file_type, "application/octet-stream")
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=resume.original_filename,
+    )
 
 
 @router.delete("/{resume_id}")

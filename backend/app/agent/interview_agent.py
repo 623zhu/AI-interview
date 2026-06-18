@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
@@ -18,7 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 
+from app.core.config import settings
+from app.core.llm import LLMServiceError
 from app.agent.tools import (
     ReactContext,
     CandidateProfile,
@@ -34,6 +38,46 @@ from app.models.job_position import JobPosition
 logger = logging.getLogger(__name__)
 
 PROFILE_TTL = 86400  # 24h
+
+INTERNAL_NOTE_RE = re.compile(
+    r"[（(][^（）()]*("
+    r"我选|选择第?\s*\d+\s*题|第\s*\d+\s*题|微调|措辞|候选池|候选题|"
+    r"内部|思考|推理|retrieve_questions|Speak|结合他|结合候选人|来问"
+    r")[^（）()]*[）)]",
+    re.IGNORECASE,
+)
+
+MARKDOWN_FORMAT_REPLACEMENTS = (
+    (re.compile(r"\*\*(.*?)\*\*"), r"\1"),
+    (re.compile(r"__(.*?)__"), r"\1"),
+    (re.compile(r"`([^`]+)`"), r"\1"),
+    (re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE), ""),
+    (re.compile(r"^\s*[-*+]\s+", re.MULTILINE), ""),
+)
+
+META_PATTERNS = (
+    "（等待",
+    "好的，刚才",
+    "等你回答",
+    "已经问出去",
+    "请回答",
+    "我选第",
+    "选择第",
+    "微调措辞",
+    "候选池",
+    "内部对话",
+    "系统内部",
+    "Speak",
+    "retrieve_questions",
+)
+
+AGENT_ERROR_MESSAGES = {
+    "agent_timeout": "本轮面试处理超时，请稍后重试。",
+    "agent_iteration_limit": "智能体本轮思考次数过多，已安全停止。请重新发送回答或稍后重试。",
+    "agent_turn_failed": "本轮面试处理失败，请稍后重试。",
+}
+
+GENERIC_FALLBACK_QUESTION = "请结合你做过的一个项目，讲讲你遇到的主要技术难点，以及你是怎么解决的？"
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -75,6 +119,34 @@ class InterviewManager:
             )
         except Exception:
             logger.warning("Failed to save profile", exc_info=True)
+
+    @staticmethod
+    def _agent_config() -> dict:
+        return {"recursion_limit": settings.REACT_AGENT_RECURSION_LIMIT}
+
+    async def _invoke_agent(self, agent, payload: dict) -> dict:
+        return await asyncio.wait_for(
+            agent.ainvoke(payload, config=self._agent_config()),
+            timeout=settings.INTERVIEW_AGENT_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    def _agent_error_payload(exc: BaseException) -> dict:
+        if isinstance(exc, LLMServiceError):
+            return exc.to_dict()
+
+        if isinstance(exc, TimeoutError):
+            code = "agent_timeout"
+        elif isinstance(exc, GraphRecursionError):
+            code = "agent_iteration_limit"
+        else:
+            code = "agent_turn_failed"
+
+        return {
+            "code": code,
+            "message": AGENT_ERROR_MESSAGES[code],
+            "retryable": True,
+        }
 
     # ── Skill tree formatting ───────────────────────────────
 
@@ -121,7 +193,7 @@ class InterviewManager:
                 job_title=job.title if job else "通用岗位",
                 job_category=job.category if job else "general",
                 resume_summary=build_resume_context(resume),
-                total_q=session.total_questions or 3,
+                total_q=(session.config or {}).get("max_turns", 12),
                 answered_count=session.current_question,
                 asked_topics=self._asked_topics(history),
                 recent_history=self._format_history(history),
@@ -131,37 +203,34 @@ class InterviewManager:
             )
 
             agent = make_interview_agent(ctx, prompt)
-            result = await agent.ainvoke({
+            result = await self._invoke_agent(agent, {
                 "messages": [HumanMessage(content=user_message or "（开场）")]
             })
 
-            speak = self._extract_speak(result)
+            agent_output = self._parse_agent_output(self._extract_speak(result))
+            speak = self._clean_candidate_message(agent_output["candidate_message"])
+            internal_note = agent_output.get("internal_note", "")
             # If agent produced meta-commentary instead of a real question
-            bad_patterns = ["（等待", "好的，刚才", "等你回答", "已经问出去", "请回答"]
-            is_meta = any(p in speak for p in bad_patterns)
-            if not speak or len(speak) < 10 or is_meta:
+            if not agent_output.get("valid") or self._is_meta_message(speak):
                 logger.warning("Agent produced meta-commentary, retrying. speak=%s", speak[:100])
-                retry_result = await agent.ainvoke({
+                retry_result = await self._invoke_agent(agent, {
                     "messages": result["messages"] + [
-                        HumanMessage(content="你刚才说的是系统内部对话，不是对候选人说的话。请从 retrieve_questions 返回的候选池中选一道题，把题目原文 Speak 出来。不要说你已经问了、不要说你等回答——直接说题目。")
+                        HumanMessage(content='你刚才的最终输出不合格。请只输出 JSON：{"action":"ask_next","candidate_message":"直接说给候选人的一句问题","internal_note":"内部选题说明"}。candidate_message 不能包含内部说明、候选池、选择第几题、微调措辞。')
                     ]
                 })
-                speak = self._extract_speak(retry_result)
+                agent_output = self._parse_agent_output(self._extract_speak(retry_result))
+                speak = self._clean_candidate_message(agent_output["candidate_message"])
+                internal_note = agent_output.get("internal_note", "")
+            if not agent_output.get("valid") or self._is_meta_message(speak):
+                speak = self._fallback_question(ctx.search_results)
+                internal_note = "Used fallback question after invalid structured agent output."
             print(f"[Agent Speak] {speak[:200]}")
-
-            # ── Emit ReAct trace: tool calls & observations ──
-            for msg in result.get("messages", []):
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        yield sse_event("action", {
-                            "tool": tc.get("name", ""),
-                            "input": tc.get("args", {}),
-                        })
-                if hasattr(msg, "type") and msg.type == "tool":
-                    yield sse_event("observation", {
-                        "tool": getattr(msg, "name", ""),
-                        "result": str(msg.content)[:300],
-                    })
+            if internal_note:
+                logger.info(
+                    "Agent internal note session=%s note=%s",
+                    session.id,
+                    internal_note[:300],
+                )
 
             # Save profile
             await self._save_profile(session.id, ctx.profile)
@@ -205,8 +274,8 @@ class InterviewManager:
             yield sse_event("question", {
                 "question_id": f"q{session.current_question}",
                 "content": speak,
-                "question_number": session.current_question,
-                "total_questions": session.total_questions,
+                "turn_number": session.current_question,
+                "answered_count": max(session.current_question - 1, 0),
                 "source_question_id": selected_question_id,
             })
 
@@ -225,9 +294,17 @@ class InterviewManager:
             await self.db.flush()
             await self.db.commit()
 
-        except Exception:
+        except (asyncio.TimeoutError, TimeoutError, GraphRecursionError) as exc:
+            logger.warning(
+                "Agent turn stopped session=%s error=%s",
+                session.id,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            yield sse_event("error", self._agent_error_payload(exc))
+        except Exception as exc:
             logger.exception("Turn failed session=%s", session.id)
-            yield sse_event("error", {"code": 500, "message": "处理出错"})
+            yield sse_event("error", self._agent_error_payload(exc))
 
     @staticmethod
     def _extract_speak(result: dict) -> str:
@@ -237,6 +314,77 @@ class InterviewManager:
                 if c and len(c.strip()) > 2:
                     return c.strip()
         return ""
+
+    @staticmethod
+    def _parse_agent_output(text: str) -> dict:
+        raw = (text or "").strip()
+        if not raw:
+            return {
+                "valid": False,
+                "action": "ask_next",
+                "candidate_message": "",
+                "internal_note": "",
+            }
+
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "valid": False,
+                "action": "ask_next",
+                "candidate_message": "",
+                "internal_note": raw[:300],
+            }
+
+        if not isinstance(parsed, dict):
+            return {
+                "valid": False,
+                "action": "ask_next",
+                "candidate_message": "",
+                "internal_note": raw[:300],
+            }
+
+        candidate_message = parsed.get("candidate_message") or parsed.get("message") or ""
+        internal_note = parsed.get("internal_note") or parsed.get("reasoning") or ""
+        action = parsed.get("action") or "ask_next"
+        valid = bool(str(candidate_message).strip())
+        return {
+            "valid": valid,
+            "action": str(action),
+            "candidate_message": str(candidate_message),
+            "internal_note": str(internal_note),
+        }
+
+    @staticmethod
+    def _clean_candidate_message(text: str) -> str:
+        """Keep only the natural question text that is safe to show candidates."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+
+        cleaned = INTERNAL_NOTE_RE.sub("", cleaned)
+        for pattern, replacement in MARKDOWN_FORMAT_REPLACEMENTS:
+            cleaned = pattern.sub(replacement, cleaned)
+
+        cleaned = re.sub(r"```.*?```", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _is_meta_message(text: str) -> bool:
+        cleaned = (text or "").strip()
+        return len(cleaned) < 10 or any(pattern in cleaned for pattern in META_PATTERNS)
+
+    @staticmethod
+    def _fallback_question(search_results: list[dict] | None) -> str:
+        for item in search_results or []:
+            content = InterviewManager._clean_candidate_message(item.get("content", ""))
+            if content and not InterviewManager._is_meta_message(content):
+                return content
+        return GENERIC_FALLBACK_QUESTION
 
     async def _get_history(self, session_id: str) -> list[dict]:
         r = await self.db.execute(
@@ -267,12 +415,12 @@ class InterviewManager:
 
     @staticmethod
     def _match_selected_question_id(speak: str, search_results: list[dict]) -> str | None:
-        normalized = "".join((speak or "").split())
+        normalized = "".join(InterviewManager._clean_candidate_message(speak).split())
         for item in search_results:
             content = item.get("content", "")
             if not content:
                 continue
-            candidate = "".join(content.split())
+            candidate = "".join(InterviewManager._clean_candidate_message(content).split())
             if normalized == candidate or normalized in candidate or candidate in normalized:
                 return item.get("id") or None
         return None

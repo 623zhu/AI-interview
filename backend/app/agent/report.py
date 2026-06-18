@@ -29,7 +29,7 @@ async def generate_report(db: AsyncSession, session_id: str) -> ScoreReport:
     rounds = []
     current_q = ""
     current_answer = ""
-    current_comment = ""
+    current_eval: dict = {}
 
     for msg in messages:
         if msg.role == "ai" and msg.message_type in ("question", "follow_up"):
@@ -38,15 +38,18 @@ async def generate_report(db: AsyncSession, session_id: str) -> ScoreReport:
                 rounds.append({
                     "question": current_q,
                     "answer": current_answer,
-                    "comment": current_comment or "",
+                    "comment": current_eval.get("comment", ""),
+                    "skill_path": current_eval.get("skill_path", ""),
+                    "confidence": current_eval.get("confidence"),
+                    "depth": current_eval.get("depth"),
+                    "gaps": current_eval.get("gaps", ""),
                 })
             current_q = msg.content
             current_answer = ""
-            current_comment = ""
+            current_eval = {}
         elif msg.role == "user":
             current_answer = msg.content
-            extra = msg.extra_data or {}
-            current_comment = extra.get("comment", "")
+            current_eval = msg.extra_data or {}
         elif msg.role == "system":
             pass
 
@@ -55,7 +58,11 @@ async def generate_report(db: AsyncSession, session_id: str) -> ScoreReport:
         rounds.append({
             "question": current_q,
             "answer": current_answer,
-            "comment": current_comment or "",
+            "comment": current_eval.get("comment", ""),
+            "skill_path": current_eval.get("skill_path", ""),
+            "confidence": current_eval.get("confidence"),
+            "depth": current_eval.get("depth"),
+            "gaps": current_eval.get("gaps", ""),
         })
 
     # Build markdown report
@@ -74,21 +81,55 @@ async def generate_report(db: AsyncSession, session_id: str) -> ScoreReport:
 
     full = "\n".join(lines)
 
-    # Simplified dimensions from profile data
-    strengths = [r["comment"] for r in rounds if r["comment"] and ("好" in r["comment"] or "不错" in r["comment"] or "准确" in r["comment"])]
-    weaknesses = [r["comment"] for r in rounds if r["comment"] and ("不足" in r["comment"] or "缺" in r["comment"] or "未" in r["comment"])]
+    scored_rounds = [
+        r for r in rounds
+        if isinstance(r.get("confidence"), (int, float)) and isinstance(r.get("depth"), (int, float))
+    ]
+    if scored_rounds:
+        avg_confidence = sum(float(r["confidence"]) for r in scored_rounds) / len(scored_rounds)
+        avg_depth = sum(float(r["depth"]) for r in scored_rounds) / len(scored_rounds)
+        overall_score = round((avg_confidence * 0.6 + avg_depth * 0.4) * 100)
+    else:
+        avg_confidence = None
+        avg_depth = None
+        overall_score = 0
+
+    strengths = [
+        f"{r.get('skill_path') or f'第{i}轮'}：{r.get('comment')}"
+        for i, r in enumerate(rounds, 1)
+        if isinstance(r.get("confidence"), (int, float)) and float(r["confidence"]) >= 0.7 and r.get("comment")
+    ]
+    weaknesses = [
+        f"{r.get('skill_path') or f'第{i}轮'}：{r.get('gaps') or r.get('comment')}"
+        for i, r in enumerate(rounds, 1)
+        if (
+            (isinstance(r.get("confidence"), (int, float)) and float(r["confidence"]) < 0.6)
+            or r.get("gaps")
+        )
+    ]
 
     report = ScoreReport(
         session_id=session_id,
         user_id=session.user_id,
-        overall_score=0,  # no numeric scoring
-        dimension_scores={},
+        overall_score=overall_score,
+        dimension_scores={
+            "avg_confidence": round(avg_confidence, 3) if avg_confidence is not None else None,
+            "avg_depth": round(avg_depth, 3) if avg_depth is not None else None,
+            "score_formula": "overall_score = (avg_confidence * 0.6 + avg_depth * 0.4) * 100",
+        },
         question_evaluations=rounds,
         strengths=strengths or [],
         weaknesses=weaknesses or [],
         improvements=[],
         full_report=full,
-        full_data={"rounds": rounds},
+        full_data={
+            "rounds": rounds,
+            "scoring": {
+                "scored_round_count": len(scored_rounds),
+                "avg_confidence": avg_confidence,
+                "avg_depth": avg_depth,
+            },
+        },
         generated_at=datetime.now(timezone.utc),
     )
     db.add(report)

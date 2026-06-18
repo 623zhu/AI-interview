@@ -1,5 +1,6 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.llm import get_llm
+from app.core.llm import LLMServiceError
 from app.utils.json_utils import parse_json
 from app.agent.prompts import RESUME_PARSE_PROMPT
 def _extract_json(text: str) -> dict:
@@ -68,5 +69,12 @@ async def parse_resume(raw_text: str) -> dict:
     response = await llm.ainvoke(messages)
     content = response.content if hasattr(response, 'content') else str(response)
 
-    parsed = _extract_json(content)
+    try:
+        parsed = _extract_json(content)
+    except ValueError as exc:
+        raise LLMServiceError(
+            "llm_response_format_error",
+            "模型返回格式异常，请稍后重试。",
+            retryable=True,
+        ) from exc
     return _validate_parsed(parsed)

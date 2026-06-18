@@ -25,6 +25,8 @@ class InterviewSession(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, default=None)
+    report_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    report_error: Mapped[str | None] = mapped_column(String(500), default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )

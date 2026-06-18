@@ -27,11 +27,14 @@ async def list_questions(
     job_category: str | None = None,
     keyword: str | None = None,
     include_inactive: bool = False,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List questions with filters. Admin can include inactive questions."""
-    base_filter = True if not (include_inactive and current_user.is_admin) else None
+    """[Admin] List questions with filters."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="题库仅管理员可访问")
+
+    base_filter = True if not include_inactive else None
     query = select(Question)
     count_query = select(func.count(Question.id))
     if base_filter is not None:
@@ -72,10 +75,13 @@ async def list_questions(
 @router.get("/{question_id}")
 async def get_question(
     question_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get question detail."""
+    """[Admin] Get question detail."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="题库仅管理员可访问")
+
     result = await db.execute(select(Question).where(Question.id == question_id))
     question = result.scalar_one_or_none()
     if not question:

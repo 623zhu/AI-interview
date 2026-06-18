@@ -57,8 +57,8 @@ export interface AdminUserDetail {
     id: string
     status: string
     job_title: string | null
-    total_questions: number
-    current_question: number
+    answered_count: number
+    max_turns: number | null
     score: number | null
     duration_seconds: number | null
     created_at: string | null

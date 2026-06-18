@@ -5,10 +5,10 @@ from pydantic import BaseModel, Field
 
 class InterviewCreateRequest(BaseModel):
     resume_id: str
-    job_title: str = Field(..., min_length=1, max_length=100, description="期望面试岗位")
+    job_id: str = Field(..., min_length=1, description="已启用岗位 ID")
     config: dict | None = Field(
         default=None,
-        description="面试配置: question_count, difficulty_distribution, max_duration_minutes, enable_follow_up"
+        description="面试安全配置: max_turns, max_duration_minutes"
     )
 
 
@@ -78,7 +78,7 @@ class InterviewListItem(BaseModel):
     id: str
     status: str
     job_title: str | None = None
-    total_questions: int
+    answered_count: int = 0
     score: int | None = None
     duration_seconds: int | None = None
     created_at: datetime

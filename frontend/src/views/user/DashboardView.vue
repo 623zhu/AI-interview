@@ -169,8 +169,8 @@ async function startInterview() {
   try {
     const { data: res } = await apiClient.post('/interviews', {
       resume_id: resume.value.id,
-      job_title: selectedJob.value.title,
-      config: { question_count: 2, difficulty_distribution: { easy: 1, medium: 4, hard: 2 }, max_duration_minutes: 45, enable_follow_up: true },
+      job_id: selectedJob.value.id,
+      config: { max_turns: 12, max_duration_minutes: 45 },
     })
     if (res.code === 201) router.push(`/interview/${res.data.id}`)
     else ElMessage.error(res.message || '创建面试失败')

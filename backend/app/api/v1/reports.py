@@ -1,5 +1,5 @@
-"""Report endpoints: list, detail, generate, regenerate."""
-from fastapi import APIRouter, Depends, HTTPException
+"""Report endpoints: list, detail, generation commands."""
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,9 +9,14 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.interview_session import InterviewSession
 from app.models.score_report import ScoreReport
-from app.models.job_position import JobPosition
-from app.schemas.report import ReportOut, ReportListItem
-from app.agent.report import generate_report
+from app.schemas.report import ReportOut
+from app.services.report_service import (
+    REPORT_COMPLETED,
+    REPORT_FAILED,
+    REPORT_PENDING,
+    generate_report_background,
+    generate_report_for_session as run_report_generation,
+)
 
 router = APIRouter()
 
@@ -69,7 +74,17 @@ async def get_report_by_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get report for a specific interview session."""
+    """Get report for a specific interview session without side effects."""
+    session_result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == session_id,
+            InterviewSession.user_id == current_user.id,
+        )
+    )
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="面试会话不存在")
+
     result = await db.execute(
         select(ScoreReport).where(
             ScoreReport.session_id == session_id,
@@ -78,28 +93,25 @@ async def get_report_by_session(
     )
     report = result.scalar_one_or_none()
     if not report:
-        # Auto-generate if session is completed but report is missing
-        session_result = await db.execute(
-            select(InterviewSession).where(InterviewSession.id == session_id)
-        )
-        session = session_result.scalar_one_or_none()
-        if not session:
-            raise HTTPException(status_code=404, detail="面试会话不存在")
+        status = session.report_status or REPORT_PENDING
+        code = 202 if session.status == "completed" and status != REPORT_FAILED else 404
+        return {
+            "code": code,
+            "data": {
+                "session_id": session.id,
+                "status": status,
+                "error": session.report_error,
+            },
+        }
 
-        # Generate report on-the-fly and complete the session
-        from app.agent.report import generate_report as _gen
-        session.status = "completed"
-        report = await _gen(db, session_id)
-        await db.commit()
-
-    # Ensure session status is synced
-    if report and report.session_id:
-        session = await db.get(InterviewSession, report.session_id)
-        if session and session.status != "completed":
-            session.status = "completed"
-            await db.commit()
-
-    return {"code": 200, "data": ReportOut.model_validate(report).model_dump()}
+    return {
+        "code": 200,
+        "data": {
+            **ReportOut.model_validate(report).model_dump(),
+            "status": REPORT_COMPLETED,
+            "error": None,
+        },
+    }
 
 
 @router.get("/{report_id}")
@@ -125,10 +137,11 @@ async def get_report(
 @router.post("/generate/{session_id}")
 async def generate_report_for_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate (or regenerate) a report for a completed interview."""
+    """Schedule report generation for a completed interview."""
     # Verify session belongs to user and is completed
     result = await db.execute(
         select(InterviewSession).where(
@@ -142,36 +155,40 @@ async def generate_report_for_session(
     if session.status != "completed":
         raise HTTPException(status_code=400, detail="面试尚未结束，无法生成报告")
 
-    # Delete existing report if any
     existing = await db.execute(
         select(ScoreReport).where(ScoreReport.session_id == session_id)
     )
-    old = existing.scalar_one_or_none()
-    if old:
-        await db.delete(old)
-        await db.flush()
-
-    # Generate new report
-    try:
-        report = await generate_report(db, session_id)
-        await db.commit()
+    report = existing.scalar_one_or_none()
+    if report:
         return {
-            "code": 201,
-            "message": "报告已生成",
-            "data": ReportOut.model_validate(report).model_dump()
+            "code": 200,
+            "message": "报告已存在",
+            "data": {
+                **ReportOut.model_validate(report).model_dump(),
+                "status": REPORT_COMPLETED,
+                "error": None,
+            },
         }
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"报告生成失败: {str(e)}")
+
+    session.report_status = REPORT_PENDING
+    session.report_error = None
+    await db.flush()
+    background_tasks.add_task(generate_report_background, session_id)
+    return {
+        "code": 202,
+        "message": "报告生成已提交",
+        "data": {"session_id": session_id, "status": REPORT_PENDING, "error": None},
+    }
 
 
 @router.post("/{report_id}/regenerate")
 async def regenerate_report(
     report_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Regenerate an existing report."""
+    """Schedule regeneration for an existing report."""
     result = await db.execute(
         select(ScoreReport).where(
             ScoreReport.id == report_id,
@@ -184,18 +201,53 @@ async def regenerate_report(
 
     session_id = report.session_id
 
-    # Delete old and regenerate
-    await db.delete(report)
+    session = await db.get(InterviewSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="面试会话不存在")
+
+    session.report_status = REPORT_PENDING
+    session.report_error = None
     await db.flush()
+    background_tasks.add_task(generate_report_background, session_id, replace=True)
+    return {
+        "code": 202,
+        "message": "报告重新生成已提交",
+        "data": {"session_id": session_id, "status": REPORT_PENDING, "error": None},
+    }
+
+
+@router.post("/generate/{session_id}/sync")
+async def generate_report_for_session_sync(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate report synchronously for tests and maintenance scripts."""
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == session_id,
+            InterviewSession.user_id == current_user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="面试会话不存在")
+    if session.status != "completed":
+        raise HTTPException(status_code=400, detail="面试尚未结束，无法生成报告")
 
     try:
-        new_report = await generate_report(db, session_id)
+        report = await run_report_generation(db, session_id, replace=True)
         await db.commit()
-        return {
-            "code": 201,
-            "message": "报告已重新生成",
-            "data": ReportOut.model_validate(new_report).model_dump()
-        }
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(status_code=500, detail=f"报告重新生成失败: {str(e)}")
+    except Exception as exc:
+        await db.commit()
+        raise HTTPException(status_code=500, detail=f"报告生成失败: {str(exc)}")
+
+    return {
+        "code": 201,
+        "message": "报告已生成",
+        "data": {
+            **ReportOut.model_validate(report).model_dump(),
+            "status": REPORT_COMPLETED,
+            "error": None,
+        },
+    }

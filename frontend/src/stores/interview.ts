@@ -11,8 +11,8 @@ interface Question {
   id: string
   content: string
   category: string
-  question_number: number
-  total_questions: number
+  turn_number: number
+  answered_count: number
 }
 
 export const useInterviewStore = defineStore('interview', () => {
@@ -20,8 +20,8 @@ export const useInterviewStore = defineStore('interview', () => {
   const status = ref<'idle' | 'active' | 'completed'>('idle')
   const messages = ref<Message[]>([])
   const currentQuestion = ref<Question | null>(null)
-  const currentQuestionIndex = ref(0)
-  const totalQuestions = ref(0)
+  const turnNumber = ref(0)
+  const answeredCount = ref(0)
   const duration = ref(0)
 
   function addMessage(msg: Message) {
@@ -37,8 +37,8 @@ export const useInterviewStore = defineStore('interview', () => {
     status.value = 'idle'
     messages.value = []
     currentQuestion.value = null
-    currentQuestionIndex.value = 0
-    totalQuestions.value = 0
+    turnNumber.value = 0
+    answeredCount.value = 0
     duration.value = 0
   }
 
@@ -47,8 +47,8 @@ export const useInterviewStore = defineStore('interview', () => {
     status,
     messages,
     currentQuestion,
-    currentQuestionIndex,
-    totalQuestions,
+    turnNumber,
+    answeredCount,
     duration,
     addMessage,
     setSession,
