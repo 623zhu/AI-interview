@@ -261,6 +261,3 @@ backend/
 └── requirements.txt
 ```
 
-## License
-
-MIT
