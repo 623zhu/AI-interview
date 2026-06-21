@@ -439,14 +439,3 @@ docs/
   images/                  # README 展示图片
 ```
 
-## 上线前说明
-
-- 请勿提交 `.env`、上传的简历文件、Chroma 本地数据、数据库 dump、`node_modules` 或构建产物。
-- README 中的截图建议使用脱敏数据，避免暴露真实邮箱、手机号、简历内容、API Key 或后台账号。
-- 生产环境建议将 MySQL、Redis、Chroma 数据目录、文件上传目录和日志目录统一纳入备份与监控。
-- DeepSeek API Key、JWT 密钥、SMTP 授权码等敏感配置应通过服务器环境变量或密钥管理服务注入。
-- 若部署在反向代理后，需要关闭 SSE 响应缓冲，保证面试流式输出能够实时返回。
-
-## License
-
-This project is currently intended for learning and portfolio demonstration. Please add a formal open-source license before public reuse, redistribution, or commercial use.
