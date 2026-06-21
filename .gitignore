@@ -14,6 +14,7 @@ dist/
 build/
 .venv/
 venv/
+.hf_cache/
 
 # ── Database / Storage ─────────────────────────────
 *.sqlite3
@@ -21,6 +22,7 @@ venv/
 *.db
 dump.rdb
 chroma_data/
+backend/eval/rag/results/
 
 # ── Uploads ────────────────────────────────────────
 uploads/

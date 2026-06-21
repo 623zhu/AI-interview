@@ -1,0 +1,139 @@
+# 手工整理的 RAG 评测集。
+# 每条 case 使用面试官自然问法，must_include_ids 是期望 top-5 命中的目标题目。
+# any_of_ids 表示语义相关的近邻题，进入 top-5 会给 nDCG 软加分。
+
+- query: "如果候选人说自己做过 RAG，你会怎么评估召回效果"
+  must_include_ids:
+    - "6adb32b6-9baa-4ae8-b642-f9934ea0d983"
+  any_of_ids:
+    - "dce28bfe-c950-44d8-aac0-61f060e17ed6"
+    - "4666ca0f-777b-43dd-b5c2-4a8d311748cb"
+  skill_nodes: ["RAG", "检索评估", "召回率"]
+
+- query: "RAG 检索命中不准时，一般从哪些地方优化"
+  must_include_ids:
+    - "dce28bfe-c950-44d8-aac0-61f060e17ed6"
+  any_of_ids:
+    - "6adb32b6-9baa-4ae8-b642-f9934ea0d983"
+    - "2dc53b81-40bb-468d-ac96-98bef9cff843"
+    - "4b8fdc5a-f584-482e-8ee1-f9bc82409239"
+  skill_nodes: ["RAG", "检索优化", "Embedding"]
+
+- query: "为什么检索后还要做 rerank，解决的是什么问题"
+  must_include_ids:
+    - "fb255185-8f2b-43bd-9661-c6209d2d57b4"
+  any_of_ids:
+    - "2dc53b81-40bb-468d-ac96-98bef9cff843"
+    - "4b8fdc5a-f584-482e-8ee1-f9bc82409239"
+  skill_nodes: ["RAG", "Rerank", "重排序"]
+
+- query: "纯向量召回有哪些缺陷，什么时候需要混合检索"
+  must_include_ids:
+    - "4b8fdc5a-f584-482e-8ee1-f9bc82409239"
+  any_of_ids:
+    - "2dc53b81-40bb-468d-ac96-98bef9cff843"
+    - "b1545a1f-8c19-46ab-be23-7ab20699dd92"
+  skill_nodes: ["RAG", "向量检索", "混合检索"]
+
+- query: "向量检索和关键词检索的结果怎么合并排序"
+  must_include_ids:
+    - "2dc53b81-40bb-468d-ac96-98bef9cff843"
+  any_of_ids:
+    - "4b8fdc5a-f584-482e-8ee1-f9bc82409239"
+    - "fb255185-8f2b-43bd-9661-c6209d2d57b4"
+  skill_nodes: ["RAG", "混合检索", "排序融合"]
+
+- query: "文档切 chunk 时大小和 overlap 应该怎么取舍"
+  must_include_ids:
+    - "2e9dfda4-cf62-4a73-b563-3e711009e6ce"
+  any_of_ids:
+    - "e94d51e5-899b-4922-9faf-41f4fa4c1ce2"
+  skill_nodes: ["RAG", "Chunk", "overlap"]
+
+- query: "切片之间留 overlap 到底有什么用"
+  must_include_ids:
+    - "e94d51e5-899b-4922-9faf-41f4fa4c1ce2"
+  any_of_ids:
+    - "2e9dfda4-cf62-4a73-b563-3e711009e6ce"
+  skill_nodes: ["RAG", "Chunk", "overlap"]
+
+- query: "中文语义检索里 embedding 模型怎么选择"
+  must_include_ids:
+    - "272412ad-8fe6-4e96-8411-2e8834bf7860"
+  any_of_ids:
+    - "b1545a1f-8c19-46ab-be23-7ab20699dd92"
+  skill_nodes: ["Embedding", "中文检索", "模型选择"]
+
+- query: "为什么向量数据库查相似问题会比普通数据库更适合"
+  must_include_ids:
+    - "b1545a1f-8c19-46ab-be23-7ab20699dd92"
+  any_of_ids:
+    - "9ec98bfa-04c0-4396-add6-40150193b823"
+  skill_nodes: ["向量数据库", "相似检索", "召回"]
+
+- query: "既然 MySQL 也能查数据，为什么不用它做相似度检索"
+  must_include_ids:
+    - "9ec98bfa-04c0-4396-add6-40150193b823"
+  any_of_ids:
+    - "b1545a1f-8c19-46ab-be23-7ab20699dd92"
+  skill_nodes: ["MySQL", "向量检索", "相似检索"]
+
+- query: "RAG 查到了正确资料但大模型还是乱编，应该怎么兜底"
+  must_include_ids:
+    - "308382ed-2964-4ba6-bc78-d51d44ecfcec"
+  any_of_ids:
+    - "dce28bfe-c950-44d8-aac0-61f060e17ed6"
+  skill_nodes: ["RAG", "幻觉", "答案约束"]
+
+- query: "Agent 和普通 LLM 调用最大的区别是什么"
+  must_include_ids:
+    - "5190b566-8428-40e4-94a0-30244f20833f"
+  any_of_ids:
+    - "43812132-e3f9-419c-90d0-940153b5845d"
+    - "46079d3f-4dd6-432b-9590-3b9a45720800"
+  skill_nodes: ["Agent", "LLM", "工具调用"]
+
+- query: "做 Agent 系统时为什么不直接写固定 workflow"
+  must_include_ids:
+    - "43812132-e3f9-419c-90d0-940153b5845d"
+  any_of_ids:
+    - "5190b566-8428-40e4-94a0-30244f20833f"
+  skill_nodes: ["Agent", "Workflow", "决策"]
+
+- query: "Function Call 在 Agent 里为什么这么重要"
+  must_include_ids:
+    - "46079d3f-4dd6-432b-9590-3b9a45720800"
+  any_of_ids:
+    - "fe6ca52e-dd89-4943-98e5-ea3d59c72344"
+  skill_nodes: ["Agent", "Function Call", "工具调用"]
+
+- query: "面试里问 Function Call 概念，可以怎么考察"
+  must_include_ids:
+    - "fe6ca52e-dd89-4943-98e5-ea3d59c72344"
+  any_of_ids:
+    - "46079d3f-4dd6-432b-9590-3b9a45720800"
+  skill_nodes: ["Function Call", "工具调用"]
+
+- query: "Agent 的短期记忆和长期记忆分别适合保存什么"
+  must_include_ids:
+    - "1f219bb6-942a-4ba2-9478-c224804664be"
+  any_of_ids:
+    - "a8d2f877-39de-481e-bc1c-ae54c502cc2f"
+    - "d4fd0bac-e9f6-4efa-b4ff-cda4e05808f7"
+  skill_nodes: ["Agent", "记忆", "短期记忆", "长期记忆"]
+
+- query: "长期记忆越积越多时，怎么避免污染后续回答"
+  must_include_ids:
+    - "9ac9b7cc-34e5-4ba6-b388-23edba1c260d"
+  any_of_ids:
+    - "a8d2f877-39de-481e-bc1c-ae54c502cc2f"
+    - "1f219bb6-942a-4ba2-9478-c224804664be"
+  skill_nodes: ["Agent", "长期记忆", "记忆治理"]
+
+- query: "如果让你设计企业级 Agent 平台，会重点考虑哪些模块"
+  must_include_ids:
+    - "500a1e08-1ca5-45aa-9f07-2b45f4fbde6e"
+  any_of_ids:
+    - "a8d2f877-39de-481e-bc1c-ae54c502cc2f"
+    - "0719ec7f-8a00-4295-9539-972260f6e9f3"
+  skill_nodes: ["Agent", "系统设计", "企业级架构"]

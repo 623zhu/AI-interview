@@ -144,6 +144,40 @@ Agent 选择并组织 candidate_message
 - 可选 reranker 对向量召回结果进行二次排序。
 - 兜底问题优先来自本轮 RAG 候选题，保证问题仍然来自可维护题库。
 
+## RAG 评测结果
+
+项目提供了 RAG 检索评测脚本，评测集位于 `backend/eval/rag/golden_curated.yaml`。该评测集从当前题库中抽取 18 道题，覆盖 RAG 召回评估、检索优化、rerank、chunk、向量数据库、Agent、Function Call 和记忆系统等场景。本次结果在已安装 `FlagEmbedding` 并成功加载 `BAAI/bge-reranker-v2-m3` 后得到。
+
+运行命令：
+
+```bash
+cd backend
+python -m eval.rag.run_eval run --label curated_rerank_real --rerank --golden eval/rag/golden_curated.yaml
+```
+
+对比命令：
+
+```bash
+python -m eval.rag.run_eval run --label curated_no_rerank_check --no-rerank --golden eval/rag/golden_curated.yaml
+python -m eval.rag.run_eval compare curated_no_rerank_check curated_rerank_real
+```
+
+本次评测结果如下：
+
+| 指标 | 无 rerank | 使用 rerank | 说明 |
+| --- | ---: | ---: | --- |
+| `total_cases` | 18 | 18 | 手工评测 query 数量 |
+| `errors` | 0 | 0 | 检索过程中无异常 |
+| `recall@5` | 1.0000 | 1.0000 | top-5 中命中标准题目的比例 |
+| `hit@1` | 0.8889 | 0.9444 | 第一名就是标准题目的比例 |
+| `mrr@10` | 0.9444 | 0.9630 | 标准题目在 top-10 中越靠前分数越高 |
+| `ndcg@5` | 0.9512 | 0.9701 | 同时考虑强相关题和弱相关题的 top-5 排序质量 |
+| `latency_p50` | 276ms | 4075ms | 一半请求的检索耗时低于该值 |
+| `latency_p95` | 6809ms | 65597ms | 95% 请求的检索耗时低于该值 |
+| `latency_mean` | 635ms | 7598ms | 平均检索耗时 |
+
+说明：`--rerank` 会尝试使用 `FlagEmbedding / BAAI/bge-reranker-v2-m3` 对 Chroma 向量召回结果进行二次排序。如果当前环境未安装 `FlagEmbedding` 或模型加载失败，系统会自动降级为纯向量检索，并在日志中输出 `rerank disabled`。在本次 18 条评测中，rerank 将 `hit@1` 从 0.8889 提升到 0.9444，将 `ndcg@5` 从 0.9512 提升到 0.9701；代价是 CPU 本地推理耗时明显增加。
+
 ## 结构化输出隔离
 
 LLM 不能只靠提示词保证永远输出正确格式，因此后端增加了强约束解析和兜底链路。Agent 最终回复要求为 JSON：
@@ -438,4 +472,3 @@ frontend/
 docs/
   images/                  # README 展示图片
 ```
-
