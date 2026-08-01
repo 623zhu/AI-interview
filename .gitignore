@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+backend/.env
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Backend runtime
+backend/logs/
+backend/uploads/
+backend/chroma_data/
+*.log
+
+# Local-only project files
+/backend/eval/
+/backend/tests/
+/backend/manage.py
+/docs/
+
+# Frontend
+frontend/node_modules/
+frontend/**/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# Test and coverage output
+.coverage
+htmlcov/
+coverage/

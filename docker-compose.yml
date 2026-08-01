@@ -1,0 +1,61 @@
+name: ai-interview
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ai_interview_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ai_interview}
+      MYSQL_USER: ${MYSQL_USER:-ait}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: UTC
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - ait
+
+  redis:
+    image: redis:8-alpine
+    container_name: ai_interview_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6381}:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ait
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  ait:
+    driver: bridge

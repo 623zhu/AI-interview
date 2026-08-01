@@ -1,0 +1,31 @@
+{
+  "name": "ai-interview-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:admin": "vite --config vite.admin.config.ts",
+    "build": "vue-tsc && vite build",
+    "build:admin": "vue-tsc && vite build --config vite.admin.config.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.40",
+    "vue-router": "^5.2.0",
+    "pinia": "^4.0.2",
+    "axios": "^1.19.0",
+    "element-plus": "^2.14.3",
+    "@element-plus/icons-vue": "^2.3.2",
+    "echarts": "^6.1.0",
+    "vue-echarts": "^8.0.1",
+    "marked": "^18.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.0",
+    "vue-tsc": "^3.3.9"
+  }
+}
